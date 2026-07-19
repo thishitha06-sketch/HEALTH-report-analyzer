@@ -141,6 +141,19 @@ export class LocalDatabase {
       // Column already exists or table doesn't exist
     }
 
+    // Safe migration to add activity_level and pregnancy_status
+    try {
+      db.prepare("ALTER TABLE user_profiles ADD COLUMN activity_level TEXT DEFAULT 'Sedentary'").run();
+    } catch (err) {
+      // Column already exists
+    }
+
+    try {
+      db.prepare("ALTER TABLE user_profiles ADD COLUMN pregnancy_status TEXT DEFAULT 'Not Applicable'").run();
+    } catch (err) {
+      // Column already exists
+    }
+
     // 2. Pre-seed high-quality mock data if database is empty
     const usersCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
     if (usersCount.count === 0) {
@@ -475,6 +488,8 @@ export class LocalDatabase {
         gender: 'Unknown',
         height: null,
         weight: null,
+        activityLevel: 'Sedentary',
+        pregnancyStatus: 'Not Applicable',
         medicalHistory: '',
         allergies: '',
         lifestylePreferences: '',
@@ -491,43 +506,67 @@ export class LocalDatabase {
     if (!user.profile.relationship) {
       user.profile.relationship = 'Self';
     }
+    if (!user.profile.activityLevel) {
+      user.profile.activityLevel = 'Sedentary';
+    }
+    if (!user.profile.pregnancyStatus) {
+      user.profile.pregnancyStatus = 'Not Applicable';
+    }
     if (!user.profiles || user.profiles.length === 0) {
       user.profiles = [user.profile];
-    } else {
-      user.profiles.forEach((p, idx) => {
-        if (!p.id) {
-          p.id = idx === 0 ? 'profile-main' : `profile-${Math.random().toString(36).substr(2, 9)}`;
-        }
-        if (!p.relationship) {
-          p.relationship = idx === 0 ? 'Self' : 'Family';
-        }
-      });
     }
+    
+    user.profiles.forEach((p, idx) => {
+      if (!p.id) {
+        p.id = idx === 0 ? 'profile-main' : `profile-${Math.random().toString(36).substr(2, 9)}`;
+      }
+      if (!p.relationship) {
+        p.relationship = idx === 0 ? 'Self' : 'Family';
+      }
+      if (!p.activityLevel) {
+        p.activityLevel = 'Sedentary';
+      }
+      if (!p.pregnancyStatus) {
+        p.pregnancyStatus = 'Not Applicable';
+      }
+      // Calculate completeness dynamically
+      p.isIncomplete = !p.age || !p.gender || p.gender === 'Unknown' || !p.height || !p.weight || !p.activityLevel || !p.pregnancyStatus;
+    });
+    // Set active profile's completeness
+    user.profile.isIncomplete = !user.profile.age || !user.profile.gender || user.profile.gender === 'Unknown' || !user.profile.height || !user.profile.weight || !user.profile.activityLevel || !user.profile.pregnancyStatus;
+    
     return user;
   }
 
   // --- Core SQL Helper Methods to map SQLite Rows back to App Types ---
   private static assembleUser(userRow: any, profileRows: any[]): User {
-    const profiles: UserProfile[] = profileRows.map(row => ({
-      id: row.id,
-      relationship: row.relationship,
-      name: row.name,
-      age: row.age === 0 ? null : row.age,
-      gender: row.gender || 'Unknown',
-      height: (row.height === 0 || row.height === null) ? null : row.height,
-      weight: (row.weight === 0 || row.weight === null) ? null : row.weight,
-      medicalHistory: row.medical_history || '',
-      allergies: row.allergies || '',
-      lifestylePreferences: row.lifestyle_preferences || '',
-      privacySettings: {
-        shareWithDoctor: row.share_with_doctor === 1,
-        anonymousResearch: row.anonymous_research === 1
-      },
-      isIncomplete: row.is_incomplete === 1
-    }));
+    const profiles: UserProfile[] = profileRows.map(row => {
+      const p: UserProfile = {
+        id: row.id,
+        relationship: row.relationship,
+        name: row.name,
+        age: row.age === 0 ? null : row.age,
+        gender: row.gender || 'Unknown',
+        height: (row.height === 0 || row.height === null) ? null : row.height,
+        weight: (row.weight === 0 || row.weight === null) ? null : row.weight,
+        activityLevel: row.activity_level || 'Sedentary',
+        pregnancyStatus: row.pregnancy_status || 'Not Applicable',
+        medicalHistory: row.medical_history || '',
+        allergies: row.allergies || '',
+        lifestylePreferences: row.lifestyle_preferences || '',
+        privacySettings: {
+          shareWithDoctor: row.share_with_doctor === 1,
+          anonymousResearch: row.anonymous_research === 1
+        },
+        isIncomplete: row.is_incomplete === 1
+      };
+      // Ensure we dynamically verify is_incomplete as well
+      p.isIncomplete = !p.age || !p.gender || p.gender === 'Unknown' || !p.height || !p.weight || !p.activityLevel || !p.pregnancyStatus;
+      return p;
+    });
 
-    // Main profile is either the one marked is_main = 1, or the first one, or self
-    let mainProfile = profiles.find(p => p.relationship === 'Self') || profiles[0];
+    // Main profile is the one marked is_main = 1, or the first one, or self
+    let mainProfile = profiles.find((p, idx) => profileRows[idx].is_main === 1) || profiles.find(p => p.relationship === 'Self') || profiles[0];
     if (!mainProfile) {
       mainProfile = {
         id: 'profile-main',
@@ -537,6 +576,8 @@ export class LocalDatabase {
         gender: 'Unknown',
         height: null,
         weight: null,
+        activityLevel: 'Sedentary',
+        pregnancyStatus: 'Not Applicable',
         medicalHistory: '',
         allergies: '',
         lifestylePreferences: '',
@@ -663,8 +704,9 @@ export class LocalDatabase {
           db.prepare(`
             INSERT INTO user_profiles (
               id, user_id, relationship, name, age, gender, height, weight,
-              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete,
+              activity_level, pregnancy_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               relationship = excluded.relationship,
               name = excluded.name,
@@ -678,7 +720,9 @@ export class LocalDatabase {
               share_with_doctor = excluded.share_with_doctor,
               anonymous_research = excluded.anonymous_research,
               is_main = excluded.is_main,
-              is_incomplete = excluded.is_incomplete
+              is_incomplete = excluded.is_incomplete,
+              activity_level = excluded.activity_level,
+              pregnancy_status = excluded.pregnancy_status
           `).run(
             p.id,
             cleanedUser.id,
@@ -694,7 +738,9 @@ export class LocalDatabase {
             p.privacySettings?.shareWithDoctor ? 1 : 0,
             p.privacySettings?.anonymousResearch ? 1 : 0,
             isMain,
-            p.isIncomplete ? 1 : 0
+            p.isIncomplete ? 1 : 0,
+            p.activityLevel || 'Sedentary',
+            p.pregnancyStatus || 'Not Applicable'
           );
         }
       }
@@ -723,8 +769,9 @@ export class LocalDatabase {
           db.prepare(`
             INSERT INTO user_profiles (
               id, user_id, relationship, name, age, gender, height, weight,
-              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete,
+              activity_level, pregnancy_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               relationship = excluded.relationship,
               name = excluded.name,
@@ -738,7 +785,9 @@ export class LocalDatabase {
               share_with_doctor = excluded.share_with_doctor,
               anonymous_research = excluded.anonymous_research,
               is_main = excluded.is_main,
-              is_incomplete = excluded.is_incomplete
+              is_incomplete = excluded.is_incomplete,
+              activity_level = excluded.activity_level,
+              pregnancy_status = excluded.pregnancy_status
           `).run(
             p.id,
             cleanedUser.id,
@@ -754,7 +803,9 @@ export class LocalDatabase {
             p.privacySettings?.shareWithDoctor ? 1 : 0,
             p.privacySettings?.anonymousResearch ? 1 : 0,
             isMain,
-            p.isIncomplete ? 1 : 0
+            p.isIncomplete ? 1 : 0,
+            p.activityLevel || 'Sedentary',
+            p.pregnancyStatus || 'Not Applicable'
           );
         }
       }

@@ -21,6 +21,8 @@ const DEFAULT_NEW_PROFILE: ProfileType = {
   gender: 'Female',
   height: 170,
   weight: 65,
+  activityLevel: 'Sedentary',
+  pregnancyStatus: 'Not Applicable',
   medicalHistory: '',
   allergies: '',
   lifestylePreferences: '',
@@ -288,6 +290,37 @@ export default function UserProfile({
                 <option value="Female">Female</option>
                 <option value="Male">Male</option>
                 <option value="Other">Other / Decline to State</option>
+              </select>
+            </div>
+
+            {/* Activity Level */}
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-stone-600 block">Activity Level</label>
+              <select
+                value={editingProfile.activityLevel || 'Sedentary'}
+                onChange={(e) => setEditingProfile({ ...editingProfile, activityLevel: e.target.value as any })}
+                className="w-full bg-[#FBF9F6] border border-stone-200 rounded-xl px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-emerald-900/10 focus:border-emerald-900 transition-all text-stone-800 appearance-none cursor-pointer"
+                id="profile-activity-level-select"
+              >
+                <option value="Sedentary">Sedentary (Little or no exercise)</option>
+                <option value="Lightly Active">Lightly Active (Light exercise 1-3 days/week)</option>
+                <option value="Moderately Active">Moderately Active (Moderate exercise 3-5 days/week)</option>
+                <option value="Very Active">Very Active (Hard exercise 6-7 days/week)</option>
+              </select>
+            </div>
+
+            {/* Pregnancy / Lactation Status */}
+            <div className="space-y-2">
+              <label className="text-sm font-semibold text-stone-600 block">Pregnancy / Lactation Status (if applicable)</label>
+              <select
+                value={editingProfile.pregnancyStatus || 'Not Applicable'}
+                onChange={(e) => setEditingProfile({ ...editingProfile, pregnancyStatus: e.target.value as any })}
+                className="w-full bg-[#FBF9F6] border border-stone-200 rounded-xl px-4 py-3 text-lg focus:outline-none focus:ring-2 focus:ring-emerald-900/10 focus:border-emerald-900 transition-all text-stone-800 appearance-none cursor-pointer"
+                id="profile-pregnancy-status-select"
+              >
+                <option value="Not Applicable">Not Applicable / Male</option>
+                <option value="Pregnant">Pregnant</option>
+                <option value="Lactating">Lactating</option>
               </select>
             </div>
 

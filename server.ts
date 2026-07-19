@@ -131,6 +131,8 @@ app.post('/api/auth/register', async (req, res) => {
         gender: gender || 'Female',
         height: 170,
         weight: 65,
+        activityLevel: 'Sedentary',
+        pregnancyStatus: 'Not Applicable',
         medicalHistory: '',
         allergies: '',
         lifestylePreferences: '',
@@ -218,6 +220,8 @@ app.post('/api/auth/google', async (req, res) => {
           gender: 'Female',
           height: 165,
           weight: 58,
+          activityLevel: 'Sedentary',
+          pregnancyStatus: 'Not Applicable',
           medicalHistory: '',
           allergies: '',
           lifestylePreferences: '',
@@ -499,23 +503,42 @@ app.post('/api/analyze', authMiddleware, async (req, res) => {
       }
     }
 
-    const age = profile?.age ?? null;
-    const gender = profile?.gender ?? "Unknown";
-    const patientName = profile?.name ?? "Patient";
+    // Validate that the profile has all required fields: age, gender, height, weight, activityLevel
+    if (
+      !profile ||
+      profile.age === null || profile.age === undefined || profile.age === 0 ||
+      !profile.gender || profile.gender === 'Unknown' ||
+      profile.height === null || profile.height === undefined || profile.height === 0 ||
+      profile.weight === null || profile.weight === undefined || profile.weight === 0 ||
+      !profile.activityLevel
+    ) {
+      console.error('[Profile Check Failed] Required demographic or biometric metrics are missing.');
+      return res.status(400).json({
+        error: 'Please complete your profile details (including Biological Sex, Age, Height, Weight, and Activity Level) in the Profile tab before running the AI evaluation.'
+      });
+    }
+
+    const age = profile.age;
+    const gender = profile.gender;
+    const patientName = profile.name || "Patient";
+    const height = profile.height;
+    const weight = profile.weight;
+    const activityLevel = profile.activityLevel || "Sedentary";
+    const pregnancyStatus = profile.pregnancyStatus || "Not Applicable";
 
     // Requirement 8: Logging
     console.log(`[Profile Audit] Status: ${profileSource}`);
     console.log(`[Profile Audit] Selected Profile ID: ${profile?.id || 'none'}`);
     console.log(`[Profile Audit] Age: ${age}`);
     console.log(`[Profile Audit] Gender: ${gender}`);
+    console.log(`[Profile Audit] Height: ${height} cm`);
+    console.log(`[Profile Audit] Weight: ${weight} kg`);
+    console.log(`[Profile Audit] Activity Level: ${activityLevel}`);
+    console.log(`[Profile Audit] Pregnancy Status: ${pregnancyStatus}`);
 
-    const demographicInstruction = (age !== null && gender !== "Unknown")
-      ? `Customize your evaluation of normal, borderline, low, high, and critical ranges based on the patient's Age (${age}) and Gender (${gender}). Specify standard references or laboratory-specific references if visible.`
-      : `If demographic information is unavailable, use laboratory-specific reference ranges when present; otherwise use standard adult reference ranges and clearly state that interpretation is less personalized.`;
+    const demographicInstruction = `Customize your evaluation of normal, borderline, low, high, and critical ranges based on the patient's Age (${age}), Biological Sex (${gender}), Height (${height} cm), Weight (${weight} kg), Activity Level (${activityLevel}), and Pregnancy Status (${pregnancyStatus}). Calculate patient's BMI as Weight / Height² (where Weight is in kg and Height is in meters). Specify standard references or laboratory-specific references if visible.`;
 
-    const demographicDailyNutrients = (age !== null && gender !== "Unknown")
-      ? `suitable for ${age}yo ${gender}`
-      : `suitable for standard adults (clearly note that demographic filters are absent)`;
+    const demographicDailyNutrients = `suitable for ${age}yo ${gender}, ${height}cm, ${weight}kg, with a ${activityLevel} lifestyle and pregnancy/lactation status of ${pregnancyStatus}`;
 
     const documentTypeInstruction = `Automatically detect what kind of medical document this is (e.g. 'Blood Report', 'MRI', 'CT Scan', 'X-Ray', 'Ultrasound', 'ECG', 'General Scan').`;
 
@@ -534,13 +557,84 @@ Never prescribe medication dosages or supplements. Always act as an educational 
 ${languageInstruction}
 
 CRITICAL INSTRUCTIONS:
-1. CUSTOM REFERENCE RANGES: ${demographicInstruction}
-2. MEDICAL TERMINOLOGY: Avoid medical jargon in the final summaries. For example, explain "Microcytic Hypochromic Anemia" as: "Your blood has lower hemoglobin than expected, meaning less oxygen may reach your body's tissues. This can cause tiredness, weakness, or dizziness."
-3. SHORT-TERM EFFECTS: Detail concrete immediate symptoms or short-term effects for any borderline/low/high/critical biomarker.
-4. LONG-TERM CONSEQUENCES: Provide possible untreated long-term health consequences, distinguishing clearly between general possibilities and confirmed diagnostic findings.
-5. FOOD RECOMMENDATIONS: For abnormal biomarkers, offer specific vegetarian and non-vegetarian foods with detailed nutrient values or descriptive benefits (e.g., "Spinach: 2.7 mg per 100g").
-6. DAILY NUTRIENTS: Offer recommended daily intakes ${demographicDailyNutrients} for relevant elements (such as Iron, Vitamin D, Calcium, Magnesium, Protein, Fiber, etc.), lists of whole-food sources, and progress estimates.
-7. CLINICAL DISCLAIMER: Suggest appropriate specialists for further discussion (e.g., Nephrologist for kidney, Hematologist/GP for anemia, Orthopedic for bones/joints) and include an explicit note that this is educational.`;
+1. CUSTOM REFERENCE RANGES & BMI CALCULATIONS: ${demographicInstruction}
+   - BMI calculation must be exact: Weight (${weight} kg) / (Height (${height} cm)/100)².
+   - Underweight (<18.5), Healthy Weight (18.5-24.9), Overweight (25.0-29.9), Obesity Class I (30.0-34.9), Obesity Class II (35.0-39.9), Obesity Class III (>=40.0).
+   - In the "doctorNotes" field, always include a section:
+     "### 1. BMI & WEIGHT ASSESSMENT
+     - **Calculated BMI**: [Value] kg/m² ([Classification])
+     - [Clear, comforting clinical explanation of what this BMI means for their health and demographic context.]"
+
+2. CLINICAL ORGAN HEALTH DASHBOARD:
+   - Meticulously evaluate the status of the following 11 organs and body systems based on the biomarkers/report data and demographic context: Brain, Heart, Liver, Kidneys, Lungs, Bones, Blood, Eyes, Nerves, Digestive System, Skin.
+   - For each organ/system, provide a status (either 'Healthy', 'Needs Monitoring', or 'Potentially Affected') and a short, educational explanation of how the values (or demographic factors/medical history) led to this assessment.
+   - Append this dashboard directly inside the "doctorNotes" field, formatted as:
+     "### 2. CLINICAL ORGAN HEALTH DASHBOARD
+     - **Brain**: [Status] - [Short educational explanation]
+     - **Heart**: [Status] - [Short educational explanation]
+     - **Liver**: [Status] - [Short educational explanation]
+     - **Kidneys**: [Status] - [Short educational explanation]
+     - **Lungs**: [Status] - [Short educational explanation]
+     - **Bones**: [Status] - [Short educational explanation]
+     - **Blood**: [Status] - [Short educational explanation]
+     - **Eyes**: [Status] - [Short educational explanation]
+     - **Nerves**: [Status] - [Short educational explanation]
+     - **Digestive System**: [Status] - [Short educational explanation]
+     - **Skin**: [Status] - [Short educational explanation]"
+
+3. OVERALL RISK SCORE & LABORATORY COMPARISON:
+   - Assign an overall clinical health score from 0 to 100 in "overallHealthScore" (where 90-100 is Excellent/Good, 75-89 is Needs Improvement, <75 is High Risk).
+   - In the "findings" field, always include:
+     "### 1. OVERALL CLINICAL RISK ASSESSMENT
+     - **Risk Level**: [Excellent | Good | Needs Improvement | High Risk]
+     - [Short, actionable explanation of the overall score and risk profile.]"
+   - Underneath that in "findings", include:
+     "### 2. LABORATORY COMPARISON & NUTRIENT GAPS
+     - [Directly compare the user's laboratory findings with their personalized requirements. Identify any nutrients where the user is deficient or at risk based on their biomarkers and recommend specific foods or lifestyle corrections to address these gaps.]"
+
+4. PERSONALIZED DAILY REQUIREMENTS:
+   - Estimate the exact daily nutritional requirements for the patient using accepted dietary guidelines based on: Age (${age}), Sex (${gender}), Height (${height} cm), Weight (${weight} kg), BMI, and Activity Level (${activityLevel}) and Pregnancy Status (${pregnancyStatus}).
+   - You MUST populate the "dailyNutrients" array with EXACTLY 20 items. Each item must have name, recommendedIntake, progress percentage, and specific whole-food sources with quantities.
+   - The 20 items MUST cover:
+     1. Calories (kcal/day)
+     2. Protein (g/day)
+     3. Carbohydrates (g/day)
+     4. Healthy Fat (g/day)
+     5. Fiber (g/day)
+     6. Water (L/day)
+     7. Calcium (mg/day)
+     8. Iron (mg/day)
+     9. Vitamin D (mcg/day)
+     10. Vitamin B12 (mcg/day)
+     11. Vitamin C (mg/day)
+     12. Vitamin A (mcg RAE/day)
+     13. Vitamin E (mg/day)
+     14. Vitamin K (mcg/day)
+     15. Magnesium (mg/day)
+     16. Potassium (mg/day)
+     17. Sodium (mg/day)
+     18. Zinc (mg/day)
+     19. Folate (mcg DFE/day)
+     20. Omega-3 Fatty Acids (g/day)
+
+5. ACTION PLAN & GLYCEMIC INDEX LOAD MANAGEMENT:
+   - In the "recommendations" field, construct a detailed multi-stage clinical action plan formatted as:
+     "### 1. CLINICAL ACTION PLAN
+     - **Today's Priorities**: [1-2 critical instant actions]
+     - **This Week's Goals**: [Key dietary/lifestyle adjustments]
+     - **Next Month's Goals**: [Longer-term targets, lifestyle patterns]
+     - **Suggested Follow-up Tests**: [Relevant clinical assays/re-testing timelines]
+     - **Lifestyle & Dietary Care**: [Structured guidelines covering Lifestyle, Dietary, Exercise, Hydration, Weight, and Sleep]"
+   - If the report contains out-of-range blood sugar markers (e.g., HbA1c, Fasting Blood Sugar, Random Blood Sugar, Glucose), always append:
+     "### 2. GLYCEMIC INDEX & LOAD-MANAGEMENT ADVICE
+     - [Actionable education on eating low-glycemic index foods, complex carbs, and managing glycemic load to stabilize blood sugar levels.]"
+     Otherwise, if blood sugar is stable or absent, append:
+     "### 2. GLYCEMIC STATUS
+     - Blood sugar levels appear stable based on provided indicators."
+
+6. CLINICAL DISCLAIMER (MANDATORY EXACT WORDING):
+   - At the absolute end of the "doctorNotes" field (after the Organ Health Dashboard), you MUST append this exact educational disclaimer verbatim:
+     "This report is an AI-generated educational summary based on the uploaded medical report and your profile information. It is not a diagnosis or a substitute for professional medical advice. Please discuss significant or concerning findings with a qualified healthcare professional."`;
 
     let processedTextContent: string | null = null;
     let passAsInlineData: any = null;

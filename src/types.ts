@@ -75,6 +75,8 @@ export interface UserProfile {
   gender: 'Male' | 'Female' | 'Other' | 'Unknown' | string;
   height: number | null; // cm
   weight: number | null; // kg
+  activityLevel?: 'Sedentary' | 'Lightly Active' | 'Moderately Active' | 'Very Active';
+  pregnancyStatus?: 'Not Applicable' | 'Pregnant' | 'Lactating';
   medicalHistory: string;
   allergies: string;
   lifestylePreferences: string;
