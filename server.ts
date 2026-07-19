@@ -37,6 +37,17 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Serve uploaded reports statically (safe path)
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
+// Requirement 4: Custom Request Logging Middleware
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    const contentType = res.get('Content-Type') || 'Unknown';
+    console.log(`[HTTP LOG] ${req.method} ${req.originalUrl} - Status: ${res.statusCode} - Type: ${contentType} - Duration: ${duration}ms`);
+  });
+  next();
+});
+
 // JWT Secret Key configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'nirva_lifestyle_medicine_jwt_secret_token_key_2026';
 
@@ -53,34 +64,38 @@ const ai = new GoogleGenAI({
 
 // Middleware to extract and verify Bearer JWT Token or legacy ID
 const authMiddleware = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const tokenStr = authHeader.substring(7);
-    let userId: string | null = null;
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const tokenStr = authHeader.substring(7);
+      let userId: string | null = null;
 
-    try {
-      // 1. Try to verify the JWT token
-      const decoded = jwt.verify(tokenStr, JWT_SECRET) as { userId: string };
-      userId = decoded.userId;
-    } catch (err) {
-      // 2. Fallback for demo login / pre-seeded credentials ('user-123')
-      if (tokenStr.startsWith('user-') || tokenStr === 'user-123') {
-        userId = tokenStr;
+      try {
+        // 1. Try to verify the JWT token
+        const decoded = jwt.verify(tokenStr, JWT_SECRET) as { userId: string };
+        userId = decoded.userId;
+      } catch (err) {
+        // 2. Fallback for demo login / pre-seeded credentials ('user-123')
+        if (tokenStr.startsWith('user-') || tokenStr === 'user-123') {
+          userId = tokenStr;
+        }
+      }
+
+      if (userId) {
+        const user = await LocalDatabase.getUserById(userId);
+        if (user) {
+          // Set the user's returned ID to match the token sent by frontend so localStorage stays in sync
+          user.id = tokenStr;
+          (req as any).user = user;
+          (req as any).realUserId = userId; // Keep real relational user ID for queries
+          return next();
+        }
       }
     }
-
-    if (userId) {
-      const user = await LocalDatabase.getUserById(userId);
-      if (user) {
-        // Set the user's returned ID to match the token sent by frontend so localStorage stays in sync
-        user.id = tokenStr;
-        (req as any).user = user;
-        (req as any).realUserId = userId; // Keep real relational user ID for queries
-        return next();
-      }
-    }
+    return res.status(401).json({ error: 'Unauthorized: Invalid or missing authentication credentials.' });
+  } catch (err) {
+    next(err);
   }
-  return res.status(401).json({ error: 'Unauthorized: Invalid or missing authentication credentials.' });
 };
 
 // ==========================================
@@ -1100,8 +1115,8 @@ async function startServer() {
   console.log(`Dist Folder Path: ${finalDistPath}`);
   console.log(`Whether index.html exists: ${indexExists}`);
 
-  // In production, or if the dist/index.html is found, serve static files
-  if (process.env.NODE_ENV === 'production' || indexExists) {
+  // In production, serve static files. In development, run Vite middleware.
+  if (process.env.NODE_ENV === 'production') {
     if (!indexExists) {
       console.error(`CRITICAL WARNING: index.html was not found at expected path: ${indexPath}`);
     } else {
