@@ -134,6 +134,13 @@ export class LocalDatabase {
       // Column already exists or table doesn't exist
     }
 
+    // Safe migration to add is_incomplete to user_profiles
+    try {
+      db.prepare("ALTER TABLE user_profiles ADD COLUMN is_incomplete INTEGER DEFAULT 0").run();
+    } catch (err) {
+      // Column already exists or table doesn't exist
+    }
+
     // 2. Pre-seed high-quality mock data if database is empty
     const usersCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
     if (usersCount.count === 0) {
@@ -459,6 +466,25 @@ export class LocalDatabase {
   }
 
   private static ensureProfiles(user: User): User {
+    if (!user.profile) {
+      user.profile = {
+        id: 'profile-main',
+        relationship: 'Self',
+        name: user.name || 'Self',
+        age: 30,
+        gender: 'Unknown',
+        height: null,
+        weight: null,
+        medicalHistory: '',
+        allergies: '',
+        lifestylePreferences: '',
+        privacySettings: {
+          shareWithDoctor: true,
+          anonymousResearch: false
+        },
+        isIncomplete: true
+      };
+    }
     if (!user.profile.id) {
       user.profile.id = 'profile-main';
     }
@@ -486,21 +512,42 @@ export class LocalDatabase {
       id: row.id,
       relationship: row.relationship,
       name: row.name,
-      age: row.age,
-      gender: row.gender,
-      height: row.height,
-      weight: row.weight,
+      age: row.age === 0 ? null : row.age,
+      gender: row.gender || 'Unknown',
+      height: (row.height === 0 || row.height === null) ? null : row.height,
+      weight: (row.weight === 0 || row.weight === null) ? null : row.weight,
       medicalHistory: row.medical_history || '',
       allergies: row.allergies || '',
       lifestylePreferences: row.lifestyle_preferences || '',
       privacySettings: {
         shareWithDoctor: row.share_with_doctor === 1,
         anonymousResearch: row.anonymous_research === 1
-      }
+      },
+      isIncomplete: row.is_incomplete === 1
     }));
 
     // Main profile is either the one marked is_main = 1, or the first one, or self
-    const mainProfile = profiles.find(p => p.relationship === 'Self') || profiles[0];
+    let mainProfile = profiles.find(p => p.relationship === 'Self') || profiles[0];
+    if (!mainProfile) {
+      mainProfile = {
+        id: 'profile-main',
+        relationship: 'Self',
+        name: userRow.name || 'Self',
+        age: 30,
+        gender: 'Unknown',
+        height: null,
+        weight: null,
+        medicalHistory: '',
+        allergies: '',
+        lifestylePreferences: '',
+        privacySettings: {
+          shareWithDoctor: true,
+          anonymousResearch: false
+        },
+        isIncomplete: true
+      };
+      profiles.push(mainProfile);
+    }
 
     return {
       id: userRow.id,
@@ -616,8 +663,8 @@ export class LocalDatabase {
           db.prepare(`
             INSERT INTO user_profiles (
               id, user_id, relationship, name, age, gender, height, weight,
-              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               relationship = excluded.relationship,
               name = excluded.name,
@@ -630,22 +677,24 @@ export class LocalDatabase {
               lifestyle_preferences = excluded.lifestyle_preferences,
               share_with_doctor = excluded.share_with_doctor,
               anonymous_research = excluded.anonymous_research,
-              is_main = excluded.is_main
+              is_main = excluded.is_main,
+              is_incomplete = excluded.is_incomplete
           `).run(
             p.id,
             cleanedUser.id,
             p.relationship || 'Self',
             p.name,
-            p.age,
-            p.gender,
-            p.height,
-            p.weight,
+            p.age ?? 0,
+            p.gender || 'Unknown',
+            p.height ?? 0,
+            p.weight ?? 0,
             p.medicalHistory || '',
             p.allergies || '',
             p.lifestylePreferences || '',
             p.privacySettings?.shareWithDoctor ? 1 : 0,
             p.privacySettings?.anonymousResearch ? 1 : 0,
-            isMain
+            isMain,
+            p.isIncomplete ? 1 : 0
           );
         }
       }
@@ -674,8 +723,8 @@ export class LocalDatabase {
           db.prepare(`
             INSERT INTO user_profiles (
               id, user_id, relationship, name, age, gender, height, weight,
-              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              medical_history, allergies, lifestyle_preferences, share_with_doctor, anonymous_research, is_main, is_incomplete
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
               relationship = excluded.relationship,
               name = excluded.name,
@@ -688,22 +737,24 @@ export class LocalDatabase {
               lifestyle_preferences = excluded.lifestyle_preferences,
               share_with_doctor = excluded.share_with_doctor,
               anonymous_research = excluded.anonymous_research,
-              is_main = excluded.is_main
+              is_main = excluded.is_main,
+              is_incomplete = excluded.is_incomplete
           `).run(
             p.id,
             cleanedUser.id,
             p.relationship || 'Self',
             p.name,
-            p.age,
-            p.gender,
-            p.height,
-            p.weight,
+            p.age ?? 0,
+            p.gender || 'Unknown',
+            p.height ?? 0,
+            p.weight ?? 0,
             p.medicalHistory || '',
             p.allergies || '',
             p.lifestylePreferences || '',
             p.privacySettings?.shareWithDoctor ? 1 : 0,
             p.privacySettings?.anonymousResearch ? 1 : 0,
-            isMain
+            isMain,
+            p.isIncomplete ? 1 : 0
           );
         }
       }

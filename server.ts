@@ -425,12 +425,83 @@ app.post('/api/analyze', authMiddleware, async (req, res) => {
 
   try {
     let profile = user.profile;
+    let profileSource = 'Profile Loaded';
+
     if (targetProfileId && user.profiles) {
       const found = user.profiles.find(p => p.id === targetProfileId);
       if (found) {
         profile = found;
+        profileSource = 'Profile Loaded (via targetProfileId)';
       }
     }
+
+    if (!profile) {
+      console.log('[Profile Recovery] Profile is missing or null. Beginning recovery...');
+      profileSource = 'Profile Missing';
+      
+      const dbUser = await LocalDatabase.getUserById(realUserId);
+      if (dbUser) {
+        if (targetProfileId && dbUser.profiles) {
+          const found = dbUser.profiles.find(p => p.id === targetProfileId);
+          if (found) {
+            profile = found;
+            profileSource = 'Profile Recovery (A - Loaded via targetProfileId)';
+          }
+        }
+        if (!profile && dbUser.profiles && dbUser.profiles.length > 0) {
+          profile = dbUser.profile || dbUser.profiles[0];
+          profileSource = 'Profile Recovery (B - Used Active/First profile)';
+        }
+      }
+
+      if (!profile) {
+        console.log('[Profile Recovery] No profile exists. Creating default profile...');
+        const defaultProfile: UserProfile = {
+          id: 'profile-main',
+          relationship: 'Self',
+          name: user.name || 'Self',
+          age: 30,
+          gender: 'Unknown',
+          height: null,
+          weight: null,
+          medicalHistory: '',
+          allergies: '',
+          lifestylePreferences: '',
+          privacySettings: {
+            shareWithDoctor: true,
+            anonymousResearch: false
+          },
+          isIncomplete: true
+        };
+
+        const targetUser = dbUser || user;
+        targetUser.profile = defaultProfile;
+        targetUser.profiles = [defaultProfile];
+        await LocalDatabase.saveUser(targetUser);
+
+        profile = defaultProfile;
+        profileSource = 'Profile Created (C - Default profile saved)';
+      }
+    }
+
+    const age = profile?.age ?? null;
+    const gender = profile?.gender ?? "Unknown";
+    const patientName = profile?.name ?? "Patient";
+
+    // Requirement 8: Logging
+    console.log(`[Profile Audit] Status: ${profileSource}`);
+    console.log(`[Profile Audit] Selected Profile ID: ${profile?.id || 'none'}`);
+    console.log(`[Profile Audit] Age: ${age}`);
+    console.log(`[Profile Audit] Gender: ${gender}`);
+
+    const demographicInstruction = (age !== null && gender !== "Unknown")
+      ? `Customize your evaluation of normal, borderline, low, high, and critical ranges based on the patient's Age (${age}) and Gender (${gender}). Specify standard references or laboratory-specific references if visible.`
+      : `If demographic information is unavailable, use laboratory-specific reference ranges when present; otherwise use standard adult reference ranges and clearly state that interpretation is less personalized.`;
+
+    const demographicDailyNutrients = (age !== null && gender !== "Unknown")
+      ? `suitable for ${age}yo ${gender}`
+      : `suitable for standard adults (clearly note that demographic filters are absent)`;
+
     const documentTypeInstruction = `Automatically detect what kind of medical document this is (e.g. 'Blood Report', 'MRI', 'CT Scan', 'X-Ray', 'Ultrasound', 'ECG', 'General Scan').`;
 
     let contents: any[] = [];
@@ -448,12 +519,12 @@ Never prescribe medication dosages or supplements. Always act as an educational 
 ${languageInstruction}
 
 CRITICAL INSTRUCTIONS:
-1. CUSTOM REFERENCE RANGES: Customize your evaluation of normal, borderline, low, high, and critical ranges based on the patient's Age (${profile.age}) and Gender (${profile.gender}). Specify standard references or laboratory-specific references if visible.
+1. CUSTOM REFERENCE RANGES: ${demographicInstruction}
 2. MEDICAL TERMINOLOGY: Avoid medical jargon in the final summaries. For example, explain "Microcytic Hypochromic Anemia" as: "Your blood has lower hemoglobin than expected, meaning less oxygen may reach your body's tissues. This can cause tiredness, weakness, or dizziness."
 3. SHORT-TERM EFFECTS: Detail concrete immediate symptoms or short-term effects for any borderline/low/high/critical biomarker.
 4. LONG-TERM CONSEQUENCES: Provide possible untreated long-term health consequences, distinguishing clearly between general possibilities and confirmed diagnostic findings.
 5. FOOD RECOMMENDATIONS: For abnormal biomarkers, offer specific vegetarian and non-vegetarian foods with detailed nutrient values or descriptive benefits (e.g., "Spinach: 2.7 mg per 100g").
-6. DAILY NUTRIENTS: Offer recommended daily intakes suitable for ${profile.age}yo ${profile.gender} for relevant elements (such as Iron, Vitamin D, Calcium, Magnesium, Protein, Fiber, etc.), lists of whole-food sources, and progress estimates.
+6. DAILY NUTRIENTS: Offer recommended daily intakes ${demographicDailyNutrients} for relevant elements (such as Iron, Vitamin D, Calcium, Magnesium, Protein, Fiber, etc.), lists of whole-food sources, and progress estimates.
 7. CLINICAL DISCLAIMER: Suggest appropriate specialists for further discussion (e.g., Nephrologist for kidney, Hematologist/GP for anemia, Orthopedic for bones/joints) and include an explicit note that this is educational.`;
 
     let processedTextContent: string | null = null;
@@ -614,7 +685,7 @@ CRITICAL INSTRUCTIONS:
 ${processedTextContent}
 ---
 ${documentTypeInstruction}
-Verify the patient demographic context: Age ${profile.age}, Gender ${profile.gender}.
+Verify the patient demographic context: ${age !== null ? 'Age ' + age : 'Age not available'}, ${gender !== 'Unknown' ? 'Gender ' + gender : 'Gender not available'}.
 Respond ONLY with a valid JSON object matching the requested schema.`
           }
         ];
@@ -625,7 +696,7 @@ Respond ONLY with a valid JSON object matching the requested schema.`
           {
             text: `Please analyze this medical document titled "${fileName}".
 ${documentTypeInstruction}
-Verify the patient demographic context: Age ${profile.age}, Gender ${profile.gender}.
+Verify the patient demographic context: ${age !== null ? 'Age ' + age : 'Age not available'}, ${gender !== 'Unknown' ? 'Gender ' + gender : 'Gender not available'}.
 Respond ONLY with a valid JSON object matching the requested schema.`
           }
         ];
@@ -644,7 +715,7 @@ Respond ONLY with a valid JSON object matching the requested schema.`
 ${textContent}
 ---
 ${documentTypeInstruction}
-Verify the patient demographic context: Age ${profile.age}, Gender ${profile.gender}.
+Verify the patient demographic context: ${age !== null ? 'Age ' + age : 'Age not available'}, ${gender !== 'Unknown' ? 'Gender ' + gender : 'Gender not available'}.
 Respond ONLY with a valid JSON object matching the requested schema.`
         }
       ];
@@ -832,7 +903,7 @@ Respond ONLY with a valid JSON object matching the requested schema.`
     const newReport: MedicalReport = {
       id: 'report-' + Math.random().toString(36).substr(2, 9),
       userId: realUserId,
-      patientName: profile.name,
+      patientName: patientName,
       fileName: fileName || 'Uploaded Report',
       fileType: fileType || 'text/plain',
       uploadDate: new Date().toISOString(),
@@ -882,6 +953,26 @@ app.post('/api/chat', authMiddleware, async (req, res) => {
       }
     }
 
+    if (!profile) {
+      profile = user.profiles?.[0] || {
+        id: 'profile-main',
+        relationship: 'Self',
+        name: user.name || 'Patient',
+        age: null,
+        gender: 'Unknown',
+        height: null,
+        weight: null,
+        medicalHistory: '',
+        allergies: '',
+        lifestylePreferences: '',
+        privacySettings: {
+          shareWithDoctor: true,
+          anonymousResearch: false
+        },
+        isIncomplete: true
+      };
+    }
+
     // Retrieve report context if specified
     let reportContextText = '';
     if (reportId) {
@@ -912,7 +1003,7 @@ ${selectedReport.analysisResult.biomarkers.map(b => `- ${b.name}: ${b.rawValue} 
     // Create the full conversation context
     const chatSystemPrompt = `You are Nirva's Premium AI Lifestyle Medicine Assistant.
 Your goal is to answer patient questions regarding their uploaded medical reports, health markers, nutrition, and lifestyle medicine.
-You are talking to ${profile.name} (Age: ${profile.age}, Gender: ${profile.gender}).${languageInstruction}
+You are talking to ${profile?.name ?? 'Patient'} (Age: ${profile?.age !== null && profile?.age !== undefined ? profile.age : 'not available'}, Gender: ${profile?.gender ?? 'not available'}).${languageInstruction}
 
 CRITICAL SAFETY & CONDUCT RULES:
 1. MEDICAL EDUCATION ONLY: Always remember that you provide educational explanations. Never diagnose, never prescribe drug dosages, and never claim certainty beyond the report findings. Recommend seeing a doctor or the suggested specialist for clinical decisions.

@@ -71,10 +71,10 @@ export interface UserProfile {
   id?: string;
   relationship?: 'Self' | 'Family' | 'Friend' | 'Spouse' | 'Child' | 'Parent' | 'Other';
   name: string;
-  age: number;
-  gender: 'Male' | 'Female' | 'Other';
-  height: number; // cm
-  weight: number; // kg
+  age: number | null;
+  gender: 'Male' | 'Female' | 'Other' | 'Unknown' | string;
+  height: number | null; // cm
+  weight: number | null; // kg
   medicalHistory: string;
   allergies: string;
   lifestylePreferences: string;
@@ -82,6 +82,7 @@ export interface UserProfile {
     shareWithDoctor: boolean;
     anonymousResearch: boolean;
   };
+  isIncomplete?: boolean;
 }
 
 export interface User {

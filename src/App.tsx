@@ -698,6 +698,26 @@ export default function App() {
 
         {/* Dynamic Inner Tab View */}
         <div className="flex-1 overflow-y-auto px-4 py-6 md:p-10 relative">
+          {user?.profile?.isIncomplete && activeTab !== 'profile' && (
+            <div className="mb-8 bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs animate-fade-in">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center text-amber-800 flex-shrink-0">
+                  <UserIcon className="w-5 h-5" />
+                </div>
+                <div className="text-left">
+                  <p className="font-semibold text-stone-850 text-sm">Incomplete Health Profile</p>
+                  <p className="text-xs text-stone-600 mt-0.5">Complete your health profile for more personalized reference ranges.</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setActiveTab('profile')}
+                className="bg-amber-850 hover:bg-amber-900 text-white px-4 py-2 rounded-xl text-xs font-bold shadow-xs transition-all flex items-center gap-1.5 cursor-pointer flex-shrink-0"
+              >
+                Complete Profile
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+          )}
           {renderActiveScreen()}
         </div>
       </main>
