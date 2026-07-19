@@ -8,6 +8,7 @@ import fs from 'fs';
 import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
+import mammoth from 'mammoth';
 import { GoogleGenAI, Type } from '@google/genai';
 import { LocalDatabase } from './src/db/local_db';
 import { User, MedicalReport, UserProfile } from './src/types';
@@ -380,6 +381,31 @@ app.delete('/api/reports/:id', authMiddleware, async (req, res) => {
   }
 });
 
+// Helper to extract printable strings from a binary buffer (like UNIX 'strings' utility) for legacy .doc files
+function extractPrintableStrings(buffer: Buffer): string {
+  let result = '';
+  let currentString = '';
+  for (let i = 0; i < buffer.length; i++) {
+    const charCode = buffer[i];
+    // Printable ASCII characters are from 32 (space) to 126 (~) plus tab (9), LF (10), CR (13)
+    if ((charCode >= 32 && charCode <= 126) || charCode === 9 || charCode === 10 || charCode === 13) {
+      currentString += String.fromCharCode(charCode);
+    } else {
+      if (currentString.length >= 4) {
+        result += currentString + '\n';
+      }
+      currentString = '';
+    }
+  }
+  if (currentString.length >= 4) {
+    result += currentString + '\n';
+  }
+  return result
+    .replace(/[^\x20-\x7E\t\r\n]/g, '') // strip any residual non-ASCII just in case
+    .replace(/\s+/g, ' ') // normalize whitespace
+    .trim();
+}
+
 // ==========================================
 // AI REPORT ANALYZER ENDPOINT
 // ==========================================
@@ -388,9 +414,12 @@ app.post('/api/analyze', authMiddleware, async (req, res) => {
   const realUserId = (req as any).realUserId as string;
   const { fileData, fileName, fileType, textContent, targetProfileId, language } = req.body;
 
+  // Validate API Key exists early
+  const geminiApiKey = process.env.GEMINI_API_KEY;
   if (!geminiApiKey) {
+    console.error('[Gemini API] Validation Error: GEMINI_API_KEY is not configured in process.env.');
     return res.status(500).json({
-      error: 'Gemini API key is not configured. Please add GEMINI_API_KEY to the Settings > Secrets panel.'
+      error: 'Gemini API key missing or invalid. Please configure GEMINI_API_KEY in the Settings > Secrets panel.'
     });
   }
 
@@ -427,25 +456,187 @@ CRITICAL INSTRUCTIONS:
 6. DAILY NUTRIENTS: Offer recommended daily intakes suitable for ${profile.age}yo ${profile.gender} for relevant elements (such as Iron, Vitamin D, Calcium, Magnesium, Protein, Fiber, etc.), lists of whole-food sources, and progress estimates.
 7. CLINICAL DISCLAIMER: Suggest appropriate specialists for further discussion (e.g., Nephrologist for kidney, Hematologist/GP for anemia, Orthopedic for bones/joints) and include an explicit note that this is educational.`;
 
+    let processedTextContent: string | null = null;
+    let passAsInlineData: any = null;
+    let storedFilePath: string | undefined = undefined;
+
+    // --- PHASE 1: FILE UPLOAD AND VALIDATION ---
+    console.log(`[File Upload] Initiating medical document upload/validation. Target Profile ID: "${targetProfileId}", Language: "${language}"`);
+
     if (fileData) {
-      // It's a file upload (PDF/Image)
-      const base64Data = fileData.includes(';base64,') ? fileData.split(';base64,')[1] : fileData;
-      contents = [
-        {
-          inlineData: {
-            data: base64Data,
-            mimeType: fileType || 'application/pdf'
+      const base64Clean = fileData.includes(';base64,') ? fileData.split(';base64,')[1] : fileData;
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.from(base64Clean, 'base64');
+      } catch (err: any) {
+        console.error('[File Upload] Failed to decode base64 file data:', err);
+        return res.status(400).json({
+          error: 'Invalid file format: Failed to decode base64 document content.',
+          details: err.message
+        });
+      }
+
+      if (buffer.length === 0) {
+        console.error('[File Upload] Validation failed: File buffer is empty.');
+        return res.status(400).json({
+          error: 'Empty document: The uploaded file contains 0 bytes of data.'
+        });
+      }
+
+      // Check max file size limit (20 MB)
+      const maxLimitBytes = 20 * 1024 * 1024;
+      if (buffer.length > maxLimitBytes) {
+        console.error(`[File Upload] Validation failed: File size is ${buffer.length} bytes (Limit: ${maxLimitBytes} bytes).`);
+        return res.status(400).json({
+          error: 'File size exceeds the limit of 20MB. Please upload a smaller document.'
+        });
+      }
+
+      // --- PHASE 2: FILE TYPE DETECTION & NORMALIZATION ---
+      const fileExt = fileName ? fileName.split('.').pop()?.toLowerCase() : '';
+      console.log(`[File Type Detection] Extracted file extension: ".${fileExt}", Declared MIME: "${fileType}"`);
+
+      // Save file to disk early so we have a persistent record
+      console.log(`[File Storage] Storing uploaded file on disk: uploads/...`);
+      try {
+        const sanitizedName = (fileName || 'report').replace(/[^a-zA-Z0-9.\-_]/g, '_');
+        const uniqueFileName = `${Date.now()}_${sanitizedName}`;
+        const relativePath = path.join('uploads', uniqueFileName);
+        const fullPath = path.join(process.cwd(), relativePath);
+        fs.writeFileSync(fullPath, buffer);
+        storedFilePath = relativePath;
+        console.log(`[File Storage] File stored successfully: "${storedFilePath}"`);
+      } catch (uploadErr: any) {
+        console.error('[File Storage] Failed to write uploaded file to disk:', uploadErr);
+        // Continue processing to not break the user experience
+      }
+
+      // Route based on extension/type
+      if (fileExt === 'txt' || fileType === 'text/plain') {
+        // --- PHASE 3A: TXT PARSING ---
+        console.log('[TXT Parsing] Decoding text file...');
+        try {
+          processedTextContent = buffer.toString('utf-8');
+          if (!processedTextContent.trim()) {
+            console.error('[TXT Parsing] Decoded text is empty.');
+            return res.status(400).json({ error: 'Empty document: The plain text file contains no text.' });
           }
-        },
-        {
-          text: `Please analyze this medical document titled "${fileName}".
+          console.log(`[TXT Parsing] Decoded text successfully (Length: ${processedTextContent.length} chars).`);
+        } catch (err: any) {
+          console.error('[TXT Parsing] Extraction failed:', err);
+          return res.status(400).json({
+            error: 'Invalid file format: Failed to read text document content.',
+            details: err.message
+          });
+        }
+      } else if (fileExt === 'docx') {
+        // --- PHASE 3B: DOCX PARSING ---
+        console.log('[DOCX Parsing] Starting Mammoth docx text extraction...');
+        try {
+          const result = await mammoth.extractRawText({ buffer });
+          processedTextContent = result.value;
+          if (!processedTextContent || !processedTextContent.trim()) {
+            console.error('[DOCX Parsing] Extracted text is empty.');
+            return res.status(400).json({ error: 'Empty document: No readable text could be extracted from this DOCX.' });
+          }
+          console.log(`[DOCX Parsing] Extraction successful (Length: ${processedTextContent.length} chars).`);
+        } catch (err: any) {
+          console.error('[DOCX Parsing] Extraction failed:', err);
+          return res.status(400).json({
+            error: 'Unsupported report format: Failed to parse DOCX file.',
+            details: err.message
+          });
+        }
+      } else if (fileExt === 'doc') {
+        // --- PHASE 3C: DOC PARSING ---
+        console.log('[DOC Parsing] Extracting printable strings from legacy DOC...');
+        try {
+          processedTextContent = extractPrintableStrings(buffer);
+          if (!processedTextContent || !processedTextContent.trim()) {
+            console.error('[DOC Parsing] No printable characters extracted from DOC.');
+            return res.status(400).json({ error: 'Empty document: No readable text could be extracted from legacy DOC.' });
+          }
+          console.log(`[DOC Parsing] Legacy extraction successful (Length: ${processedTextContent.length} chars).`);
+        } catch (err: any) {
+          console.error('[DOC Parsing] Legacy extraction failed:', err);
+          return res.status(400).json({
+            error: 'Unsupported report format: Failed to parse legacy DOC file.',
+            details: err.message
+          });
+        }
+      } else if (fileExt === 'pdf' || fileType === 'application/pdf') {
+        // --- PHASE 3D: PDF PARSING & SCAN CHECK ---
+        console.log('[PDF Parsing] Validating PDF format...');
+        if (buffer.length < 4 || buffer.toString('ascii', 0, 4) !== '%PDF') {
+          console.error('[PDF Parsing] File starts with invalid header bytes.');
+          return res.status(400).json({ error: 'Invalid file format: The PDF file is corrupted or invalid.' });
+        }
+        console.log('[PDF Parsing] Valid PDF header. Scanned/native PDF processing delegated to Gemini multi-modal OCR.');
+        passAsInlineData = {
+          inlineData: {
+            data: base64Clean,
+            mimeType: 'application/pdf'
+          }
+        };
+      } else if (['jpg', 'jpeg', 'png', 'heic', 'heif'].includes(fileExt) || fileType.startsWith('image/')) {
+        // --- PHASE 3E: IMAGE PROCESSING & OCR PREP ---
+        console.log('[Image Processing] Normalizing and preparing image for Gemini OCR...');
+        let normalizedMime = fileType;
+        if (fileExt === 'png') normalizedMime = 'image/png';
+        if (fileExt === 'jpg' || fileExt === 'jpeg') normalizedMime = 'image/jpeg';
+        if (fileExt === 'heic') normalizedMime = 'image/heic';
+        if (fileExt === 'heif') normalizedMime = 'image/heif';
+
+        if (!normalizedMime || normalizedMime === 'application/octet-stream') {
+          normalizedMime = 'image/jpeg';
+        }
+        console.log(`[Image Processing] Selected MIME type for inlineData: "${normalizedMime}". Size: ${buffer.length} bytes.`);
+        passAsInlineData = {
+          inlineData: {
+            data: base64Clean,
+            mimeType: normalizedMime
+          }
+        };
+      } else {
+        console.error(`[File Type Detection] Unsupported extension/MIME: Ext: "${fileExt}", MIME: "${fileType}"`);
+        return res.status(400).json({
+          error: 'Unsupported report format: Only PDF, DOC, DOCX, TXT, and image files (JPG, PNG, HEIC) are supported.'
+        });
+      }
+
+      // Compile content payload for Gemini API
+      if (processedTextContent) {
+        console.log('[Upload Pipeline] Sending extracted text content directly to Gemini.');
+        contents = [
+          {
+            text: `Please analyze the following extracted medical report text:
+---
+${processedTextContent}
+---
 ${documentTypeInstruction}
 Verify the patient demographic context: Age ${profile.age}, Gender ${profile.gender}.
 Respond ONLY with a valid JSON object matching the requested schema.`
-        }
-      ];
+          }
+        ];
+      } else if (passAsInlineData) {
+        console.log('[Upload Pipeline] Passing multi-modal inlineData file directly to Gemini (handles scanned/native pages perfectly).');
+        contents = [
+          passAsInlineData,
+          {
+            text: `Please analyze this medical document titled "${fileName}".
+${documentTypeInstruction}
+Verify the patient demographic context: Age ${profile.age}, Gender ${profile.gender}.
+Respond ONLY with a valid JSON object matching the requested schema.`
+          }
+        ];
+      }
     } else if (textContent) {
-      // Text-only report (such as copied text)
+      // --- PHASE 3F: PASTE TEXT PROCESSING ---
+      console.log('[Upload Pipeline] Processing pasted text input...');
+      if (!textContent.trim()) {
+        console.error('[Upload Pipeline] Validation failed: Pasted text input is empty.');
+        return res.status(400).json({ error: 'Empty document: The pasted report text is empty.' });
+      }
       contents = [
         {
           text: `Please analyze the following medical report text:
@@ -458,154 +649,186 @@ Respond ONLY with a valid JSON object matching the requested schema.`
         }
       ];
     } else {
+      console.error('[Upload Pipeline] Validation failed: No fileData or textContent provided.');
       return res.status(400).json({ error: 'No report data provided. Please upload a file or paste report text.' });
     }
 
-    // Call Gemini API using modern @google/genai syntax
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.5-flash',
-      contents: contents,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            title: {
-              type: Type.STRING,
-              description: "The official clinical name of the medical report or test panel."
-            },
-            documentType: {
-              type: Type.STRING,
-              description: "The detected type. Allowed values: 'Blood Report', 'MRI', 'CT Scan', 'X-Ray', 'Ultrasound', 'ECG', 'General Scan', 'Other'."
-            },
-            overallHealthScore: {
-              type: Type.INTEGER,
-              description: "A calculated summary health score out of 100 (e.g. 90-100 optimal, 75-89 minor alerts, 50-74 moderate corrections, <50 critical focus)."
-            },
-            doctorNotes: {
-              type: Type.STRING,
-              description: "An elegant, clinical-style summary of the physician notes, observations, or general findings."
-            },
-            findings: {
-              type: Type.STRING,
-              description: "A concise bulleted or paragraph summary of primary clinical findings."
-            },
-            diagnosis: {
-              type: Type.STRING,
-              description: "Possible educational diagnostic explanations or general terms corresponding to findings."
-            },
-            recommendations: {
-              type: Type.STRING,
-              description: "Personalized lifestyle, diet, movement, stress, or sleep actions based on results."
-            },
-            specialistRecommendation: {
-              type: Type.OBJECT,
-              properties: {
-                specialist: { type: Type.STRING, description: "E.g., Orthopedic Surgeon, Cardiologist, Endocrinologist, General Physician, Nephrologist." },
-                reason: { type: Type.STRING, description: "Detailed clinical/educational reasoning for why this specialist is suggested." },
-                note: { type: Type.STRING, description: "Must clearly state this is an educational guideline, not a direct medical prescription." }
+    // --- PHASE 4: GEMINI API REQUEST ---
+    console.log('[Gemini API Request] Initializing request with "gemini-3.5-flash"...');
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-3.5-flash',
+        contents: contents,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: {
+                type: Type.STRING,
+                description: "The official clinical name of the medical report or test panel."
               },
-              required: ["specialist", "reason", "note"]
-            },
-            biomarkers: {
-              type: Type.ARRAY,
-              description: "List of all extracted blood markers, vitals, or specific physical findings.",
-              items: {
+              documentType: {
+                type: Type.STRING,
+                description: "The detected type. Allowed values: 'Blood Report', 'MRI', 'CT Scan', 'X-Ray', 'Ultrasound', 'ECG', 'General Scan', 'Other'."
+              },
+              overallHealthScore: {
+                type: Type.INTEGER,
+                description: "A calculated summary health score out of 100 (e.g. 90-100 optimal, 75-89 minor alerts, 50-74 moderate corrections, <50 critical focus)."
+              },
+              doctorNotes: {
+                type: Type.STRING,
+                description: "An elegant, clinical-style summary of the physician notes, observations, or general findings."
+              },
+              findings: {
+                type: Type.STRING,
+                description: "A concise bulleted or paragraph summary of primary clinical findings."
+              },
+              diagnosis: {
+                type: Type.STRING,
+                description: "Possible educational diagnostic explanations or general terms corresponding to findings."
+              },
+              recommendations: {
+                type: Type.STRING,
+                description: "Personalized lifestyle, diet, movement, stress, or sleep actions based on results."
+              },
+              specialistRecommendation: {
                 type: Type.OBJECT,
                 properties: {
-                  name: { type: Type.STRING, description: "Marker name (e.g., Hemoglobin, Serum Creatinine, L4-L5 Joint)." },
-                  value: { type: Type.NUMBER, description: "Numeric representation of the value (for graphing trends), or 0 if qualitative/non-numeric." },
-                  rawValue: { type: Type.STRING, description: "The literal result value (e.g., '9.3', 'Mild Narrowing', '140/90')." },
-                  unit: { type: Type.STRING, description: "Unit of measurement (e.g., 'g/dL', 'mg/dL', 'mmHg', 'Structure')." },
-                  referenceRange: { type: Type.STRING, description: "Laboratory expected standard range tailored to the patient profile (e.g., '12.0 - 15.5')." },
-                  status: {
-                    type: Type.STRING,
-                    description: "Evaluation status. Must be strictly one of: 'Normal', 'Borderline', 'High', 'Low', 'Critical'."
-                  },
-                  explanation: { type: Type.STRING, description: "Clear, comforting, jargon-free explanation of what this marker means." },
-                  shortTermEffects: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: "List of potential direct short-term symptoms or effects if abnormal."
-                  },
-                  longTermEffects: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                    description: "List of possible long-term risks if this remains untreated."
-                  },
-                  foodRecommendations: {
-                    type: Type.ARRAY,
-                    description: "Nutritious whole-foods that can help manage or optimize this marker.",
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        foodName: { type: Type.STRING, description: "E.g. Spinach, Lentils, Salmon." },
-                        amount: { type: Type.STRING, description: "Quantity description (e.g., '2.7 mg per 100g', 'Soluble fiber source')." },
-                        isVegetarian: { type: Type.BOOLEAN, description: "True if plant-based/vegetarian friendly, False if meat/fish." }
-                      },
-                      required: ["foodName", "amount", "isVegetarian"]
-                    }
-                  }
+                  specialist: { type: Type.STRING, description: "E.g., Orthopedic Surgeon, Cardiologist, Endocrinologist, General Physician, Nephrologist." },
+                  reason: { type: Type.STRING, description: "Detailed clinical/educational reasoning for why this specialist is suggested." },
+                  note: { type: Type.STRING, description: "Must clearly state this is an educational guideline, not a direct medical prescription." }
                 },
-                required: ["name", "rawValue", "unit", "referenceRange", "status", "explanation", "shortTermEffects", "longTermEffects", "foodRecommendations"]
+                required: ["specialist", "reason", "note"]
+              },
+              biomarkers: {
+                type: Type.ARRAY,
+                description: "List of all extracted blood markers, vitals, or specific physical findings.",
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING, description: "Marker name (e.g., Hemoglobin, Serum Creatinine, L4-L5 Joint)." },
+                    value: { type: Type.NUMBER, description: "Numeric representation of the value (for graphing trends), or 0 if qualitative/non-numeric." },
+                    rawValue: { type: Type.STRING, description: "The literal result value (e.g., '9.3', 'Mild Narrowing', '140/90')." },
+                    unit: { type: Type.STRING, description: "Unit of measurement (e.g., 'g/dL', 'mg/dL', 'mmHg', 'Structure')." },
+                    referenceRange: { type: Type.STRING, description: "Laboratory expected standard range tailored to the patient profile (e.g., '12.0 - 15.5')." },
+                    status: {
+                      type: Type.STRING,
+                      description: "Evaluation status. Must be strictly one of: 'Normal', 'Borderline', 'High', 'Low', 'Critical'."
+                    },
+                    explanation: { type: Type.STRING, description: "Clear, comforting, jargon-free explanation of what this marker means." },
+                    shortTermEffects: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: "List of potential direct short-term symptoms or effects if abnormal."
+                    },
+                    longTermEffects: {
+                      type: Type.ARRAY,
+                      items: { type: Type.STRING },
+                      description: "List of possible long-term risks if this remains untreated."
+                    },
+                    foodRecommendations: {
+                      type: Type.ARRAY,
+                      description: "Nutritious whole-foods that can help manage or optimize this marker.",
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          foodName: { type: Type.STRING, description: "E.g. Spinach, Lentils, Salmon." },
+                          amount: { type: Type.STRING, description: "Quantity description (e.g., '2.7 mg per 100g', 'Soluble fiber source')." },
+                          isVegetarian: { type: Type.BOOLEAN, description: "True if plant-based/vegetarian friendly, False if meat/fish." }
+                        },
+                        required: ["foodName", "amount", "isVegetarian"]
+                      }
+                    }
+                  },
+                  required: ["name", "rawValue", "unit", "referenceRange", "status", "explanation", "shortTermEffects", "longTermEffects", "foodRecommendations"]
+                }
+              },
+              dailyNutrients: {
+                type: Type.ARRAY,
+                description: "Recommended daily nutrient guidelines appropriate for the user's demographic.",
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING, description: "Nutrient name (e.g., Iron, Vitamin D, Vitamin B12, Calcium)." },
+                    recommendedIntake: { type: Type.STRING, description: "Recommended daily quantity (e.g., '18 mg/day', '1000 mg/day')." },
+                    progress: { type: Type.INTEGER, description: "Estimated baseline coverage percentage from typical diet (0-100)." },
+                    sources: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          foodName: { type: Type.STRING },
+                          quantity: { type: Type.STRING, description: "E.g., '3.3 mg per cup', '300 mg per serving'." }
+                        },
+                        required: ["foodName", "quantity"]
+                      }
+                    }
+                  },
+                  required: ["name", "recommendedIntake", "progress", "sources"]
+                }
               }
             },
-            dailyNutrients: {
-              type: Type.ARRAY,
-              description: "Recommended daily nutrient guidelines appropriate for the user's demographic.",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING, description: "Nutrient name (e.g., Iron, Vitamin D, Vitamin B12, Calcium)." },
-                  recommendedIntake: { type: Type.STRING, description: "Recommended daily quantity (e.g., '18 mg/day', '1000 mg/day')." },
-                  progress: { type: Type.INTEGER, description: "Estimated baseline coverage percentage from typical diet (0-100)." },
-                  sources: {
-                    type: Type.ARRAY,
-                    items: {
-                      type: Type.OBJECT,
-                      properties: {
-                        foodName: { type: Type.STRING },
-                        quantity: { type: Type.STRING, description: "E.g., '3.3 mg per cup', '300 mg per serving'." }
-                      },
-                      required: ["foodName", "quantity"]
-                    }
-                  }
-                },
-                required: ["name", "recommendedIntake", "progress", "sources"]
-              }
-            }
-          },
-          required: ["title", "documentType", "overallHealthScore", "doctorNotes", "findings", "diagnosis", "recommendations", "specialistRecommendation", "biomarkers", "dailyNutrients"]
+            required: ["title", "documentType", "overallHealthScore", "doctorNotes", "findings", "diagnosis", "recommendations", "specialistRecommendation", "biomarkers", "dailyNutrients"]
+          }
         }
+      });
+      console.log('[Gemini API Response] Successfully received response.');
+    } catch (apiErr: any) {
+      console.error('[Gemini API Request Failed] Complete Error Stack:', apiErr);
+      const errMsg = apiErr.message || '';
+      if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid') || errMsg.includes('API key')) {
+        return res.status(401).json({
+          error: 'Gemini API key missing or invalid. Please configure GEMINI_API_KEY inside Settings > Secrets.',
+          details: errMsg
+        });
       }
-    });
-
-    if (!response.text) {
-      throw new Error('Empty response from AI analysis engine.');
+      if (errMsg.includes('QUOTA_EXCEEDED') || errMsg.includes('quota') || errMsg.includes('429') || errMsg.includes('ResourceExhausted')) {
+        return res.status(429).json({
+          error: 'Gemini API quota exceeded. Please check your usage limits or try again in a few minutes.',
+          details: errMsg
+        });
+      }
+      return res.status(502).json({
+        error: 'Gemini API request failed. The clinical analysis service is temporarily unavailable.',
+        details: errMsg
+      });
     }
 
-    const cleanJsonText = response.text.replace(/```json|```/gi, '').trim();
-    const parsedResult = JSON.parse(cleanJsonText);
-
-    // Save file on disk and get relative path if fileData was provided
-    let storedFilePath: string | undefined = undefined;
-    if (fileData) {
-      try {
-        const base64Data = fileData.includes(';base64,') ? fileData.split(';base64,')[1] : fileData;
-        const sanitizedName = (fileName || 'report').replace(/[^a-zA-Z0-9.\-_]/g, '_');
-        const uniqueFileName = `${Date.now()}_${sanitizedName}`;
-        const relativePath = path.join('uploads', uniqueFileName);
-        const fullPath = path.join(process.cwd(), relativePath);
-        fs.writeFileSync(fullPath, Buffer.from(base64Data, 'base64'));
-        storedFilePath = relativePath;
-      } catch (uploadErr) {
-        console.error('Failed to write uploaded file to disk:', uploadErr);
-        // Continue saving report details to DB even if disk write fails
-      }
+    // --- PHASE 5: OCR EXTRACTION & RESPONSE PARSING ---
+    console.log('[OCR Extraction] Parsing Gemini structured response...');
+    if (!response || !response.text) {
+      console.error('[OCR Extraction] Failed: Received empty/null response text from Gemini.');
+      return res.status(502).json({
+        error: 'OCR extraction failed: AI engine returned an empty medical report analysis.'
+      });
     }
 
-    // Save the report to SQLite database under realUserId
+    let parsedResult;
+    try {
+      const cleanJsonText = response.text.replace(/```json|```/gi, '').trim();
+      parsedResult = JSON.parse(cleanJsonText);
+    } catch (parseErr: any) {
+      console.error('[OCR Extraction] Failed to parse generated JSON. Raw output was:', response.text);
+      console.error(parseErr);
+      return res.status(502).json({
+        error: 'OCR extraction failed: Medical report text could not be processed into structured laboratory data.',
+        details: parseErr.message
+      });
+    }
+
+    // Structure validation check
+    if (!parsedResult.title || !parsedResult.documentType || !parsedResult.biomarkers) {
+      console.error('[OCR Extraction] Validation failed: Parsed object lacks critical properties:', parsedResult);
+      return res.status(502).json({
+        error: 'OCR extraction failed: Structured clinical fields are missing in the generated medical report.'
+      });
+    }
+
+    // --- PHASE 6: SQLITE DATABASE OPERATIONS ---
+    console.log(`[SQLite Database Operations] Storing analyzed report ID: "report-..." for user ID: "${realUserId}"`);
     const newReport: MedicalReport = {
       id: 'report-' + Math.random().toString(36).substr(2, 9),
       userId: realUserId,
@@ -618,13 +841,21 @@ Respond ONLY with a valid JSON object matching the requested schema.`
       filePath: storedFilePath
     };
 
-    await LocalDatabase.saveReport(newReport);
-    res.json({ report: newReport });
-
+    try {
+      await LocalDatabase.saveReport(newReport);
+      console.log(`[SQLite Database Operations] Successfully saved report: "${newReport.id}"`);
+      res.json({ report: newReport });
+    } catch (dbErr: any) {
+      console.error('[SQLite Database Operations] Failed to persist report in database:', dbErr);
+      return res.status(500).json({
+        error: 'Database write failed: Could not save the processed medical report to history.',
+        details: dbErr.message
+      });
+    }
   } catch (err: any) {
-    console.error('Error in medical analysis route:', err);
+    console.error('Error in general medical analysis routine:', err);
     res.status(500).json({
-      error: 'Failed to analyze the document. Please ensure the file is legible and contains medical report data.',
+      error: 'An unexpected internal error occurred during report analysis.',
       details: err.message
     });
   }
