@@ -755,20 +755,83 @@ async function startServer() {
     });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  // Robust path resolution for production build directory 'dist'
+  const cwd = process.cwd();
+  let finalDistPath = '';
+
+  if (fs.existsSync(path.join(cwd, 'dist', 'index.html'))) {
+    finalDistPath = path.join(cwd, 'dist');
+  } else if (fs.existsSync(path.join(__dirname, 'index.html'))) {
+    finalDistPath = __dirname;
+  } else if (fs.existsSync(path.join(__dirname, 'dist', 'index.html'))) {
+    finalDistPath = path.join(__dirname, 'dist');
+  } else {
+    finalDistPath = path.join(cwd, 'dist');
+  }
+
+  const indexPath = path.join(finalDistPath, 'index.html');
+  const indexExists = fs.existsSync(indexPath);
+
+  // STARTUP DIAGNOSTICS LOGS REQUIRED FOR RENDER DEPLOYMENT
+  console.log('=== Render Production Ready Diagnostics ===');
+  console.log(`Current Working Directory: ${cwd}`);
+  console.log(`Dist Folder Path: ${finalDistPath}`);
+  console.log(`Whether index.html exists: ${indexExists}`);
+
+  // In production, or if the dist/index.html is found, serve static files
+  if (process.env.NODE_ENV === 'production' || indexExists) {
+    if (!indexExists) {
+      console.error(`CRITICAL WARNING: index.html was not found at expected path: ${indexPath}`);
+    } else {
+      console.log('Static files loaded successfully.');
+    }
+
+    // Serve static files from the dist directory
+    app.use(express.static(finalDistPath));
+
+    // Wildcard route to handle React Router client-side routing (e.g. /, /login, /dashboard, /report, /profile)
+    app.get('*', (req, res, next) => {
+      // Allow fallback only for non-API, non-Upload requests
+      if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+        return next();
+      }
+
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        // Return clear descriptive error instead of silently sending "Not Found"
+        res.status(500).send(`
+          <!DOCTYPE html>
+          <html>
+            <head>
+              <title>Production Build Asset Missing</title>
+              <style>
+                body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; line-height: 1.6; max-width: 600px; margin: 50px auto; padding: 20px; color: #1f2937; }
+                h1 { color: #dc2626; font-size: 24px; margin-bottom: 16px; border-bottom: 2px solid #f3f4f6; padding-bottom: 12px; }
+                p { font-size: 15px; margin-bottom: 12px; }
+                code { background: #f3f4f6; padding: 3px 6px; border-radius: 4px; font-family: monospace; font-size: 14px; word-break: break-all; }
+                .footer { margin-top: 30px; font-size: 13px; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 15px; }
+              </style>
+            </head>
+            <body>
+              <h1>Production Build index.html Not Found</h1>
+              <p>The Nirva Lifestyle Medicine server started successfully, but the built frontend assets (specifically <code>index.html</code>) are missing or inaccessible.</p>
+              <p><strong>Attempted Index Path:</strong> <code>${indexPath}</code></p>
+              <p><strong>Current Working Directory (CWD):</strong> <code>${cwd}</code></p>
+              <p>Please verify that <code>npm run build</code> completed successfully in your build environment before deploying or starting the server.</p>
+              <div class="footer">Nirva Lifestyle Medicine App Server Diagnostics</div>
+            </body>
+          </html>
+        `);
+      }
+    });
+  } else {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
     console.log('Vite development middleware integrated.');
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-    console.log('Production static asset distribution loaded.');
   }
 
   app.listen(PORT, '0.0.0.0', () => {
