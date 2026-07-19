@@ -1,0 +1,37 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Playfair+Display:ital,wght@0,400;0,500;0,600;0,750;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", Georgia, Cambria, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-natural-bg: #fcfaf7;
+  --color-natural-text: #2d3648;
+  --color-natural-header: #1a202c;
+  
+  --color-brand-primary: #3a7d6e;
+  --color-brand-hover: #2d6156;
+  --color-brand-light: #f0f4f3;
+  --color-brand-dark: #1a3a34;
+  --color-brand-border: #d3dfdc;
+
+  /* Natural Tones Re-theme of Emerald to Sage/Forest Green */
+  --color-emerald-50: #f0f4f3;
+  --color-emerald-100: #e1eae8;
+  --color-emerald-200: #d3dfdc;
+  --color-emerald-300: #b5c7c4;
+  --color-emerald-400: #8da9a4;
+  --color-emerald-500: #628881;
+  --color-emerald-600: #3a7d6e; /* Primary Brand */
+  --color-emerald-700: #2d6156; /* Hover Accent */
+  --color-emerald-800: #21453d;
+  --color-emerald-900: #3a7d6e; /* Map heavy buttons to main green */
+  --color-emerald-950: #1a3a34; /* Rich natural dark header */
+}
+
+body {
+  background-color: var(--color-natural-bg);
+  color: var(--color-natural-text);
+  font-family: var(--font-sans);
+}

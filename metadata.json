@@ -1,0 +1,6 @@
+{
+  "name": "Medical Report Analyzer & Health Guide",
+  "description": "An interactive medical report analyzer and health companion that parses laboratory panels and medical scans, presenting clinical biometric trends and personalized educational insights.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
