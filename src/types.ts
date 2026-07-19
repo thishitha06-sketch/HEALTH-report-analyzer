@@ -64,6 +64,7 @@ export interface MedicalReport {
   uploadDate: string;
   documentType: string;
   analysisResult: AnalysisResult;
+  filePath?: string;
 }
 
 export interface UserProfile {

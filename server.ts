@@ -4,6 +4,10 @@ import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
+import helmet from 'helmet';
+import cors from 'cors';
+import compression from 'compression';
 import { GoogleGenAI, Type } from '@google/genai';
 import { LocalDatabase } from './src/db/local_db';
 import { User, MedicalReport, UserProfile } from './src/types';
@@ -12,11 +16,25 @@ import { User, MedicalReport, UserProfile } from './src/types';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+
+// Production-ready security headers, compression, and CORS
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false,
+  crossOriginOpenerPolicy: false,
+  crossOriginResourcePolicy: false,
+  frameguard: false
+}));
+app.use(cors());
+app.use(compression());
 
 // Set up larger limits for base64 file uploads
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+
+// Serve uploaded reports statically (safe path)
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
 // JWT Secret Key configuration
 const JWT_SECRET = process.env.JWT_SECRET || 'nirva_lifestyle_medicine_jwt_secret_token_key_2026';
@@ -570,6 +588,23 @@ Respond ONLY with a valid JSON object matching the requested schema.`
     const cleanJsonText = response.text.replace(/```json|```/gi, '').trim();
     const parsedResult = JSON.parse(cleanJsonText);
 
+    // Save file on disk and get relative path if fileData was provided
+    let storedFilePath: string | undefined = undefined;
+    if (fileData) {
+      try {
+        const base64Data = fileData.includes(';base64,') ? fileData.split(';base64,')[1] : fileData;
+        const sanitizedName = (fileName || 'report').replace(/[^a-zA-Z0-9.\-_]/g, '_');
+        const uniqueFileName = `${Date.now()}_${sanitizedName}`;
+        const relativePath = path.join('uploads', uniqueFileName);
+        const fullPath = path.join(process.cwd(), relativePath);
+        fs.writeFileSync(fullPath, Buffer.from(base64Data, 'base64'));
+        storedFilePath = relativePath;
+      } catch (uploadErr) {
+        console.error('Failed to write uploaded file to disk:', uploadErr);
+        // Continue saving report details to DB even if disk write fails
+      }
+    }
+
     // Save the report to SQLite database under realUserId
     const newReport: MedicalReport = {
       id: 'report-' + Math.random().toString(36).substr(2, 9),
@@ -579,7 +614,8 @@ Respond ONLY with a valid JSON object matching the requested schema.`
       fileType: fileType || 'text/plain',
       uploadDate: new Date().toISOString(),
       documentType: parsedResult.documentType || 'Blood Report',
-      analysisResult: parsedResult
+      analysisResult: parsedResult,
+      filePath: storedFilePath
     };
 
     await LocalDatabase.saveReport(newReport);
@@ -700,6 +736,25 @@ CRITICAL SAFETY & CONDUCT RULES:
 // ==========================================
 
 async function startServer() {
+  // Global API 404 handler for undefined API endpoints
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: 'NotFound',
+      message: `API route not found: ${req.method} ${req.originalUrl}`
+    });
+  });
+
+  // Global Error Handler for API routes and general unhandled middleware errors
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('Global Error Handler caught an error:', err);
+    const statusCode = err.status || err.statusCode || 500;
+    res.status(statusCode).json({
+      error: err.name || 'InternalServerError',
+      message: err.message || 'An unexpected internal server error occurred.',
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

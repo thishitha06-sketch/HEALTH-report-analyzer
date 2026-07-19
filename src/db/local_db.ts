@@ -11,6 +11,12 @@ const db = new Database(dbPath);
 // Enable foreign key constraints
 db.pragma('foreign_keys = ON');
 
+// Ensure uploads folder exists automatically
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 export class LocalDatabase {
   private static seeded = false;
 
@@ -62,6 +68,7 @@ export class LocalDatabase {
         specialist_name TEXT,
         specialist_reason TEXT,
         specialist_note TEXT,
+        file_path TEXT,
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
@@ -119,6 +126,13 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_ai_conversations_user ON ai_conversations(user_id);
       CREATE INDEX IF NOT EXISTS idx_health_timeline_user_param ON health_timeline(user_id, parameter);
     `);
+
+    // Safe migration to add file_path to medical_reports if table was created in earlier turn without it
+    try {
+      db.prepare("ALTER TABLE medical_reports ADD COLUMN file_path TEXT").run();
+    } catch (err) {
+      // Column already exists or table doesn't exist
+    }
 
     // 2. Pre-seed high-quality mock data if database is empty
     const usersCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
@@ -527,6 +541,7 @@ export class LocalDatabase {
       fileType: reportRow.file_type,
       uploadDate: reportRow.upload_date,
       documentType: reportRow.document_type,
+      filePath: reportRow.file_path || undefined,
       analysisResult: {
         title: reportRow.title,
         documentType: reportRow.document_type as any,
@@ -811,8 +826,8 @@ export class LocalDatabase {
         INSERT INTO medical_reports (
           id, user_id, patient_name, file_name, file_type, upload_date, document_type,
           title, overall_health_score, doctor_notes, findings, diagnosis, recommendations,
-          specialist_name, specialist_reason, specialist_note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          specialist_name, specialist_reason, specialist_note, file_path
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           patient_name = excluded.patient_name,
           file_name = excluded.file_name,
@@ -827,7 +842,8 @@ export class LocalDatabase {
           recommendations = excluded.recommendations,
           specialist_name = excluded.specialist_name,
           specialist_reason = excluded.specialist_reason,
-          specialist_note = excluded.specialist_note
+          specialist_note = excluded.specialist_note,
+          file_path = excluded.file_path
       `).run(
         report.id,
         report.userId,
@@ -844,7 +860,8 @@ export class LocalDatabase {
         report.analysisResult.recommendations || '',
         report.analysisResult.specialistRecommendation?.specialist || '',
         report.analysisResult.specialistRecommendation?.reason || '',
-        report.analysisResult.specialistRecommendation?.note || ''
+        report.analysisResult.specialistRecommendation?.note || '',
+        report.filePath || null
       );
 
       // 2. Clean existing children (biomarkers, nutrients)
