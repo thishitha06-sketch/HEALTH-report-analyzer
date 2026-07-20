@@ -9,6 +9,9 @@ import helmet from 'helmet';
 import cors from 'cors';
 import compression from 'compression';
 import mammoth from 'mammoth';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const pdf = require('pdf-parse');
 import { GoogleGenAI, Type } from '@google/genai';
 import { LocalDatabase } from './src/db/local_db';
 import { User, MedicalReport, UserProfile } from './src/types';
@@ -86,6 +89,23 @@ const ai = new GoogleGenAI({
   }
 });
 
+// Configure the default and configured Gemini models
+const DEFAULT_MODEL = 'gemini-3.5-flash';
+const SUPPORTED_MODELS = ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'];
+const CONFIGURED_MODEL = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+let MODEL = CONFIGURED_MODEL;
+
+// Log key availability and last 4 characters of API key on startup
+if (geminiApiKey) {
+  const lastFour = geminiApiKey.slice(-4);
+  console.log(`[Gemini Config] API Key is PRESENT (ends with "...${lastFour}")`);
+} else {
+  console.log(`[Gemini Config] API Key is ABSENT`);
+}
+
+// Log model name during server startup
+console.log(`[Gemini Config] Configured Model: "${MODEL}"`);
+
 // Helper to perform Gemini API requests with exponential backoff retry on transient errors
 async function generateContentWithRetry(params: { model: string; contents: any; config?: any }, maxRetries = 4, initialDelay = 1000) {
   let attempt = 0;
@@ -93,7 +113,7 @@ async function generateContentWithRetry(params: { model: string; contents: any; 
   
   // Model fallbacks for text models under high load/demand
   const fallbackModels: Record<string, string[]> = {
-    'gemini-3.5-flash': ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b'],
+    'gemini-3.5-flash': ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
   };
 
   while (true) {
@@ -105,9 +125,25 @@ async function generateContentWithRetry(params: { model: string; contents: any; 
       });
     } catch (error: any) {
       attempt++;
-      // Determine if error is a transient/retryable error (e.g., 503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502 BAD GATEWAY)
       const status = error.status || error.statusCode || (error.error && error.error.code);
       const errorMsg = error.message || '';
+      
+      // Check for "Model not found" / 404 / "does not exist" or "not found"
+      const isModelNotFoundError = status === 404 || 
+                                   errorMsg.includes('not found') || 
+                                   errorMsg.includes('NOT_FOUND') ||
+                                   errorMsg.includes('does not exist') ||
+                                   errorMsg.includes('unsupported model');
+
+      if (isModelNotFoundError && currentModel !== DEFAULT_MODEL) {
+        console.warn(`[Gemini Auto-Fallback] Warning: Model "${currentModel}" does not exist or is deprecated: "${errorMsg}". Automatically falling back to "${DEFAULT_MODEL}" and continuing.`);
+        currentModel = DEFAULT_MODEL;
+        // Reset attempts since we changed to a fresh model
+        attempt = 0;
+        continue;
+      }
+
+      // Determine if error is a transient/retryable error (e.g., 503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502 BAD GATEWAY)
       const isTransient = status === 503 || status === 429 || status === 502 || status === 504 ||
                           errorMsg.includes('503') ||
                           errorMsg.includes('502') ||
@@ -121,7 +157,7 @@ async function generateContentWithRetry(params: { model: string; contents: any; 
       if (isTransient && attempt <= maxRetries) {
         const delay = initialDelay * Math.pow(2, attempt - 1);
         
-        const fallbacks = fallbackModels[params.model];
+        const fallbacks = fallbackModels[currentModel] || fallbackModels[DEFAULT_MODEL];
         if (fallbacks && (attempt - 1) < fallbacks.length) {
           currentModel = fallbacks[attempt - 1];
           console.warn(`[Gemini Retry] Attempt ${attempt}/${maxRetries} failed with transient error: "${errorMsg}". Falling back to model "${currentModel}" in ${delay}ms...`);
@@ -824,13 +860,27 @@ CRITICAL INSTRUCTIONS:
           console.error('[PDF Parsing] File starts with invalid header bytes.');
           return res.status(400).json({ error: 'Invalid file format: The PDF file is corrupted or invalid.' });
         }
-        console.log('[PDF Parsing] Valid PDF header. Scanned/native PDF processing delegated to Gemini multi-modal OCR.');
-        passAsInlineData = {
-          inlineData: {
-            data: base64Clean,
-            mimeType: 'application/pdf'
+        console.log('[PDF Parsing] Parsing PDF to extract text content...');
+        try {
+          const pdfData = await pdf(buffer);
+          processedTextContent = pdfData.text;
+          console.log(`[PDF Parsing] Extracted text length: ${processedTextContent ? processedTextContent.length : 0} chars.`);
+          
+          if (!processedTextContent || !processedTextContent.trim()) {
+            console.error('[PDF Parsing] No text extracted from PDF file.');
+            return res.status(400).json({
+              success: false,
+              error: 'No readable medical report text was extracted from the uploaded file.'
+            });
           }
-        };
+        } catch (pdfErr: any) {
+          console.error('[PDF Parsing] Failed to parse PDF:', pdfErr);
+          return res.status(400).json({
+            success: false,
+            error: 'No readable medical report text was extracted from the uploaded file.',
+            details: pdfErr.message
+          });
+        }
       } else if (['jpg', 'jpeg', 'png', 'heic', 'heif'].includes(fileExt) || fileType.startsWith('image/')) {
         // --- PHASE 3E: IMAGE PROCESSING & OCR PREP ---
         console.log('[Image Processing] Normalizing and preparing image for Gemini OCR...');
@@ -907,11 +957,20 @@ Respond ONLY with a valid JSON object matching the requested schema.`
     }
 
     // --- PHASE 4: GEMINI API REQUEST ---
-    console.log('[Gemini API Request] Initializing request with "gemini-3.5-flash"...');
+    const promptSize = (systemPrompt?.length || 0) + JSON.stringify(contents).length;
+    const isFileUploaded = !!fileData;
+    const extractedTextLength = processedTextContent ? processedTextContent.length : 0;
+
+    console.log(`[Gemini Pipeline Log] Prompt size: ${promptSize} characters`);
+    console.log(`[Gemini Pipeline Log] Uploaded file detected: ${isFileUploaded}`);
+    console.log(`[Gemini Pipeline Log] Extracted text length: ${extractedTextLength} characters`);
+    console.log(`[Gemini Pipeline Log] Gemini request started with model: "${MODEL}"`);
+
+    const requestStartTime = Date.now();
     let response;
     try {
       response = await generateContentWithRetry({
-        model: 'gemini-3.5-flash',
+        model: MODEL,
         contents: contents,
         config: {
           systemInstruction: systemPrompt,
@@ -1028,25 +1087,22 @@ Respond ONLY with a valid JSON object matching the requested schema.`
           }
         }
       });
-      console.log('[Gemini API Response] Successfully received response.');
+      const requestDuration = Date.now() - requestStartTime;
+      console.log(`[Gemini Pipeline Log] Gemini response received`);
+      console.log(`[Gemini Pipeline Log] Request duration: ${requestDuration}ms`);
     } catch (apiErr: any) {
+      const requestDuration = Date.now() - requestStartTime;
       console.error('[Gemini API Request Failed] Complete Error Stack:', apiErr);
-      const errMsg = apiErr.message || '';
-      if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('key not valid') || errMsg.includes('API key')) {
-        return res.status(401).json({
-          error: 'Gemini API key missing or invalid. Please configure GEMINI_API_KEY inside Settings > Secrets.',
-          details: errMsg
-        });
-      }
-      if (errMsg.includes('QUOTA_EXCEEDED') || errMsg.includes('quota') || errMsg.includes('429') || errMsg.includes('ResourceExhausted')) {
-        return res.status(429).json({
-          error: 'Gemini API quota exceeded. Please check your usage limits or try again in a few minutes.',
-          details: errMsg
-        });
-      }
-      return res.status(502).json({
-        error: 'Gemini API request failed. The clinical analysis service is temporarily unavailable.',
-        details: errMsg
+      const status = apiErr.status || apiErr.statusCode || (apiErr.error && apiErr.error.code) || 'N/A';
+      const errorCode = apiErr.code || (apiErr.error && apiErr.error.status) || 'N/A';
+      const errMsg = apiErr.message || String(apiErr);
+      const stackTrace = apiErr.stack || 'N/A';
+
+      console.error(`[Gemini Pipeline Log] Gemini Request Failed. Status: ${status}, Error Code: ${errorCode}, Error Message: ${errMsg}, Duration: ${requestDuration}ms, Stack Trace: ${stackTrace}`);
+
+      return res.status(apiErr.status || 502).json({
+        success: false,
+        error: errMsg
       });
     }
 
@@ -1211,14 +1267,34 @@ CRITICAL SAFETY & CONDUCT RULES:
       parts: [{ text: message }]
     });
 
-    const response = await generateContentWithRetry({
-      model: 'gemini-3.5-flash',
-      contents: formattedContents,
-      config: {
-        systemInstruction: chatSystemPrompt,
-        temperature: 0.7,
-      }
-    });
+    const chatStartTime = Date.now();
+    let response;
+    try {
+      response = await generateContentWithRetry({
+        model: MODEL,
+        contents: formattedContents,
+        config: {
+          systemInstruction: chatSystemPrompt,
+          temperature: 0.7,
+        }
+      });
+      const chatDuration = Date.now() - chatStartTime;
+      console.log(`[Gemini Pipeline Log] Chat response received in ${chatDuration}ms`);
+    } catch (apiErr: any) {
+      const chatDuration = Date.now() - chatStartTime;
+      console.error('[Gemini API Request Failed] Complete Chat Error Stack:', apiErr);
+      const status = apiErr.status || apiErr.statusCode || (apiErr.error && apiErr.error.code) || 'N/A';
+      const errorCode = apiErr.code || (apiErr.error && apiErr.error.status) || 'N/A';
+      const errMsg = apiErr.message || String(apiErr);
+      const stackTrace = apiErr.stack || 'N/A';
+
+      console.error(`[Gemini Pipeline Log] Gemini Chat Request Failed. Status: ${status}, Error Code: ${errorCode}, Error Message: ${errMsg}, Duration: ${chatDuration}ms, Stack Trace: ${stackTrace}`);
+
+      return res.status(apiErr.status || 502).json({
+        success: false,
+        error: errMsg
+      });
+    }
 
     const replyText = response.text || 'I apologize, but I am unable to formulate a response at this time.';
 
@@ -1230,7 +1306,7 @@ CRITICAL SAFETY & CONDUCT RULES:
 
   } catch (err: any) {
     console.error('Error in AI chat assistant route:', err);
-    res.status(500).json({ error: 'Failed to generate chat response.', details: err.message });
+    res.status(500).json({ success: false, error: err.message || 'Failed to generate chat response.' });
   }
 });
 
