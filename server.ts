@@ -90,10 +90,43 @@ const ai = new GoogleGenAI({
 });
 
 // Configure the default and configured Gemini models
-const DEFAULT_MODEL = 'gemini-3.5-flash';
-const SUPPORTED_MODELS = ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'];
-const CONFIGURED_MODEL = process.env.GEMINI_MODEL || DEFAULT_MODEL;
-let MODEL = CONFIGURED_MODEL;
+const DEFAULT_MODEL = 'gemini-2.5-flash';
+const SUPPORTED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-3.5-flash',
+  'gemini-3.1-pro-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-latest'
+];
+
+let sdkVersion = 'unknown';
+try {
+  sdkVersion = require('@google/genai/package.json').version;
+} catch (e) {
+  try {
+    sdkVersion = require('/app/applet/node_modules/@google/genai/package.json').version;
+  } catch (e2) {
+    // fallback
+  }
+}
+
+const CONFIGURED_MODEL = process.env.GEMINI_MODEL || '';
+let MODEL = DEFAULT_MODEL;
+let fallbackOccurred = false;
+let fallbackReason = '';
+
+if (CONFIGURED_MODEL) {
+  if (SUPPORTED_MODELS.includes(CONFIGURED_MODEL)) {
+    MODEL = CONFIGURED_MODEL;
+  } else {
+    fallbackOccurred = true;
+    fallbackReason = `Configured GEMINI_MODEL "${CONFIGURED_MODEL}" is not supported or deprecated.`;
+    MODEL = DEFAULT_MODEL;
+  }
+} else {
+  MODEL = DEFAULT_MODEL;
+}
 
 // Log key availability and last 4 characters of API key on startup
 if (geminiApiKey) {
@@ -103,8 +136,38 @@ if (geminiApiKey) {
   console.log(`[Gemini Config] API Key is ABSENT`);
 }
 
-// Log model name during server startup
-console.log(`[Gemini Config] Configured Model: "${MODEL}"`);
+// Log SDK version, selected model, and fallbacks
+console.log(`[Gemini Config] SDK Version: ${sdkVersion}`);
+console.log(`[Gemini Config] Selected Model: "${MODEL}"`);
+
+if (fallbackOccurred) {
+  console.warn(`[Gemini Config] Warning: Model fallback occurred! Reason: ${fallbackReason}. Automatically falling back to "${MODEL}" and continuing.`);
+}
+
+// Startup test with a simple generateContent request
+async function runStartupVerification() {
+  if (!geminiApiKey) {
+    console.log('[Gemini Config] Startup verification skipped (API key not found).');
+    return;
+  }
+  console.log(`[Gemini Config] Initiating startup verification test with model: "${MODEL}"...`);
+  try {
+    const testResponse = await ai.models.generateContent({
+      model: MODEL,
+      contents: 'Ping',
+    });
+    console.log(`[Gemini Config] Startup verification test SUCCESSFUL. Response: "${testResponse.text?.trim()}"`);
+  } catch (testError: any) {
+    console.error('[Gemini Config] Startup verification test FAILED! Exact API Error:');
+    console.error({
+      status: testError.status || testError.statusCode || (testError.error && testError.error.code) || 'N/A',
+      errorCode: testError.code || (testError.error && testError.error.status) || 'N/A',
+      message: testError.message || String(testError),
+      stack: testError.stack || 'N/A'
+    });
+  }
+}
+runStartupVerification();
 
 // Helper to perform Gemini API requests with exponential backoff retry on transient errors
 async function generateContentWithRetry(params: { model: string; contents: any; config?: any }, maxRetries = 4, initialDelay = 1000) {
@@ -113,6 +176,7 @@ async function generateContentWithRetry(params: { model: string; contents: any; 
   
   // Model fallbacks for text models under high load/demand
   const fallbackModels: Record<string, string[]> = {
+    'gemini-2.5-flash': ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
     'gemini-3.5-flash': ['gemini-3.1-pro-preview', 'gemini-3.1-flash-lite'],
   };
 
