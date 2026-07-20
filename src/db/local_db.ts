@@ -7,14 +7,26 @@ import { User, MedicalReport, UserProfile, Biomarker, NutrientRequirement } from
 
 // Establish the SQLite database file in a guaranteed-writable directory (like /tmp in Cloud Run/deployment)
 const isProductionEnv = process.env.NODE_ENV === 'production' || !process.env.DISABLE_HMR;
+let isWorkspaceWritable = true;
+try {
+  const testFile = path.join(process.cwd(), '.write_test_db');
+  fs.writeFileSync(testFile, 'test');
+  fs.unlinkSync(testFile);
+} catch (e) {
+  isWorkspaceWritable = false;
+}
+
+const useTmp = isProductionEnv || !isWorkspaceWritable;
 let dbPath = path.join(process.cwd(), 'medical_ai.db');
 
-if (isProductionEnv) {
+if (useTmp) {
   const tmpDbPath = '/tmp/medical_ai.db';
   try {
+    const hasExistingTmp = fs.existsSync(tmpDbPath) && fs.statSync(tmpDbPath).size > 0;
     // If the database file exists in the workspace, copy it to /tmp to retain pre-seeded data
-    if (fs.existsSync(dbPath) && !fs.existsSync(tmpDbPath)) {
+    if (fs.existsSync(dbPath) && !hasExistingTmp) {
       console.log(`[DB Initialization] Copying pre-existing database to writeable /tmp path...`);
+      fs.mkdirSync(path.dirname(tmpDbPath), { recursive: true });
       fs.copyFileSync(dbPath, tmpDbPath);
     }
     dbPath = tmpDbPath;
@@ -31,7 +43,7 @@ db.pragma('foreign_keys = ON');
 
 // Ensure uploads folder exists automatically and is writable (use /tmp in production/deployed)
 let uploadsDir = path.join(process.cwd(), 'uploads');
-if (isProductionEnv) {
+if (useTmp) {
   uploadsDir = '/tmp/uploads';
 }
 

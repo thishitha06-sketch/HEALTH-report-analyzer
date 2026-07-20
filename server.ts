@@ -36,8 +36,18 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Ensure uploads folder exists and is writable (use /tmp/uploads in production/deployed environment)
 const isProductionEnv = process.env.NODE_ENV === 'production' || !process.env.DISABLE_HMR;
+let isWorkspaceWritable = true;
+try {
+  const testFile = path.join(process.cwd(), '.write_test_srv');
+  fs.writeFileSync(testFile, 'test');
+  fs.unlinkSync(testFile);
+} catch (e) {
+  isWorkspaceWritable = false;
+}
+
+const useTmp = isProductionEnv || !isWorkspaceWritable;
 let uploadsDir = path.join(process.cwd(), 'uploads');
-if (isProductionEnv) {
+if (useTmp) {
   uploadsDir = '/tmp/uploads';
 }
 if (!fs.existsSync(uploadsDir)) {
