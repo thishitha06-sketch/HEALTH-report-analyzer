@@ -31,7 +31,42 @@ function getRequire(): any {
 }
 
 const requireFn = getRequire();
-const pdf = requireFn('pdf-parse');
+const pdfModule = requireFn('pdf-parse');
+
+// Add startup logging for pdf-parse module
+console.log(`[PDF Parsing] pdfModule type: ${typeof pdfModule}`);
+if (pdfModule && typeof pdfModule === 'object') {
+  console.log(`[PDF Parsing] pdfModule keys: ${Object.keys(pdfModule).join(', ')}`);
+} else {
+  console.log(`[PDF Parsing] pdfModule keys: N/A`);
+}
+
+function getPdfParser(mod: any): any {
+  if (typeof mod === 'function') {
+    return mod;
+  }
+  if (mod && typeof mod === 'object') {
+    if (typeof mod.default === 'function') {
+      return mod.default;
+    }
+    // Search for any exported function (named exports)
+    for (const key of Object.keys(mod)) {
+      if (typeof mod[key] === 'function') {
+        return mod[key];
+      }
+    }
+  }
+  return null;
+}
+
+const pdfParseFn = getPdfParser(pdfModule);
+
+const pdf = async (buffer: Buffer, options?: any) => {
+  if (typeof pdfParseFn !== 'function') {
+    throw new Error('Failed to load pdf-parse correctly. The resolved value is not a function.');
+  }
+  return await pdfParseFn(buffer, options);
+};
 import { GoogleGenAI, Type } from '@google/genai';
 import { LocalDatabase } from './src/db/local_db';
 import { User, MedicalReport, UserProfile } from './src/types';
