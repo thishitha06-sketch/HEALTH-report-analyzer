@@ -10,8 +10,28 @@ import cors from 'cors';
 import compression from 'compression';
 import mammoth from 'mammoth';
 import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdf = require('pdf-parse');
+
+function getRequire(): any {
+  // If running in CommonJS, use standard require()
+  if (typeof require !== 'undefined') {
+    return require;
+  }
+  // If running in ESM, use createRequire(import.meta.url) only when import.meta.url is guaranteed to exist
+  if (typeof import.meta !== 'undefined' && typeof import.meta.url === 'string' && import.meta.url) {
+    try {
+      return createRequire(import.meta.url);
+    } catch (e) {
+      // Ignore and fall through
+    }
+  }
+  // Fallback dummy function
+  return (id: string) => {
+    throw new Error(`require is not supported in this environment for module: ${id}`);
+  };
+}
+
+const requireFn = getRequire();
+const pdf = requireFn('pdf-parse');
 import { GoogleGenAI, Type } from '@google/genai';
 import { LocalDatabase } from './src/db/local_db';
 import { User, MedicalReport, UserProfile } from './src/types';
@@ -102,10 +122,20 @@ const SUPPORTED_MODELS = [
 
 let sdkVersion = 'unknown';
 try {
-  sdkVersion = require('@google/genai/package.json').version;
+  if (typeof requireFn === 'function') {
+    const pkg = requireFn('@google/genai/package.json');
+    if (pkg && pkg.version) {
+      sdkVersion = pkg.version;
+    }
+  }
 } catch (e) {
   try {
-    sdkVersion = require('/app/applet/node_modules/@google/genai/package.json').version;
+    if (typeof requireFn === 'function') {
+      const pkg = requireFn('/app/applet/node_modules/@google/genai/package.json');
+      if (pkg && pkg.version) {
+        sdkVersion = pkg.version;
+      }
+    }
   } catch (e2) {
     // fallback
   }
@@ -167,8 +197,6 @@ async function runStartupVerification() {
     });
   }
 }
-runStartupVerification();
-
 // Helper to perform Gemini API requests with exponential backoff retry on transient errors
 async function generateContentWithRetry(params: { model: string; contents: any; config?: any }, maxRetries = 4, initialDelay = 1000) {
   let attempt = 0;
@@ -1480,6 +1508,8 @@ async function startServer() {
 
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is actively running on port ${PORT}`);
+    // Run the startup verification check only after the server successfully binds and starts
+    runStartupVerification();
   });
 }
 
