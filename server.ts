@@ -503,28 +503,14 @@ app.post('/api/analyze', authMiddleware, async (req, res) => {
       }
     }
 
-    // Validate that the profile has all required fields: age, gender, height, weight, activityLevel
-    if (
-      !profile ||
-      profile.age === null || profile.age === undefined || profile.age === 0 ||
-      !profile.gender || profile.gender === 'Unknown' ||
-      profile.height === null || profile.height === undefined || profile.height === 0 ||
-      profile.weight === null || profile.weight === undefined || profile.weight === 0 ||
-      !profile.activityLevel
-    ) {
-      console.error('[Profile Check Failed] Required demographic or biometric metrics are missing.');
-      return res.status(400).json({
-        error: 'Please complete your profile details (including Biological Sex, Age, Height, Weight, and Activity Level) in the Profile tab before running the AI evaluation.'
-      });
-    }
-
-    const age = profile.age;
-    const gender = profile.gender;
-    const patientName = profile.name || "Patient";
-    const height = profile.height;
-    const weight = profile.weight;
-    const activityLevel = profile.activityLevel || "Sedentary";
-    const pregnancyStatus = profile.pregnancyStatus || "Not Applicable";
+    // Gracefully handle missing profile fields by falling back to sensible defaults
+    const age = (profile && profile.age !== null && profile.age !== undefined && profile.age !== 0) ? profile.age : 30;
+    const gender = (profile && profile.gender && profile.gender !== 'Unknown') ? profile.gender : 'Female';
+    const patientName = (profile && profile.name) ? profile.name : "Patient";
+    const height = (profile && profile.height !== null && profile.height !== undefined && profile.height !== 0) ? profile.height : 170;
+    const weight = (profile && profile.weight !== null && profile.weight !== undefined && profile.weight !== 0) ? profile.weight : 65;
+    const activityLevel = (profile && profile.activityLevel) ? profile.activityLevel : "Sedentary";
+    const pregnancyStatus = (profile && profile.pregnancyStatus) ? profile.pregnancyStatus : "Not Applicable";
 
     // Requirement 8: Logging
     console.log(`[Profile Audit] Status: ${profileSource}`);

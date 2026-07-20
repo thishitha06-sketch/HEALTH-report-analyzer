@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
 import { User, MedicalReport, UserProfile, Biomarker, NutrientRequirement } from '../types';
 
 // Establish the SQLite database file in the project workspace root
@@ -19,6 +20,21 @@ if (!fs.existsSync(uploadsDir)) {
 
 export class LocalDatabase {
   private static seeded = false;
+
+  private static resolveUserId(userId: string): string {
+    if (userId && !userId.startsWith('user-')) {
+      try {
+        const decoded = jwt.decode(userId) as { userId: string };
+        if (decoded && decoded.userId) {
+          console.log(`[DEBUG DB] Resolved JWT token userId from: "${userId.substring(0, 15)}..." to: "${decoded.userId}"`);
+          return decoded.userId;
+        }
+      } catch (err: any) {
+        console.error('[DEBUG DB] Error decoding JWT to resolve userId:', err.message);
+      }
+    }
+    return userId;
+  }
 
   private static initDatabase() {
     if (this.seeded) return;
@@ -683,6 +699,9 @@ export class LocalDatabase {
 
   public static async saveUser(user: User) {
     this.initDatabase();
+    const realId = this.resolveUserId(user.id);
+    console.log('[DEBUG DB] saveUser - Input user.id:', user.id, 'Real relational ID:', realId);
+
     // Use transaction to ensure full atomicity
     const transaction = db.transaction(() => {
       // 1. Insert or Replace User
@@ -692,7 +711,7 @@ export class LocalDatabase {
         ON CONFLICT(id) DO UPDATE SET
           email = excluded.email,
           name = excluded.name
-      `).run(user.id, user.email.toLowerCase(), user.name, user.createdAt || new Date().toISOString());
+      `).run(realId, user.email.toLowerCase(), user.name, user.createdAt || new Date().toISOString());
 
       // 2. Ensure Profiles list is complete
       const cleanedUser = this.ensureProfiles(user);
@@ -725,7 +744,7 @@ export class LocalDatabase {
               pregnancy_status = excluded.pregnancy_status
           `).run(
             p.id,
-            cleanedUser.id,
+            realId,
             p.relationship || 'Self',
             p.name,
             p.age ?? 0,
@@ -746,12 +765,21 @@ export class LocalDatabase {
       }
     });
 
-    transaction();
+    try {
+      transaction();
+      console.log('[DEBUG DB] saveUser successfully completed SQLite transaction.');
+    } catch (err: any) {
+      console.error('[DEBUG DB] saveUser transaction FAILED:', err.message);
+      throw err;
+    }
   }
 
   // Save User along with their password hash
   public static async saveUserWithPassword(user: User, passwordHash: string) {
     this.initDatabase();
+    const realId = this.resolveUserId(user.id);
+    console.log('[DEBUG DB] saveUserWithPassword - Input user.id:', user.id, 'Real relational ID:', realId);
+
     const transaction = db.transaction(() => {
       db.prepare(`
         INSERT INTO users (id, email, name, password_hash, created_at)
@@ -760,7 +788,7 @@ export class LocalDatabase {
           email = excluded.email,
           name = excluded.name,
           password_hash = excluded.password_hash
-      `).run(user.id, user.email.toLowerCase(), user.name, passwordHash, user.createdAt || new Date().toISOString());
+      `).run(realId, user.email.toLowerCase(), user.name, passwordHash, user.createdAt || new Date().toISOString());
 
       const cleanedUser = this.ensureProfiles(user);
       if (cleanedUser.profiles) {
@@ -790,7 +818,7 @@ export class LocalDatabase {
               pregnancy_status = excluded.pregnancy_status
           `).run(
             p.id,
-            cleanedUser.id,
+            realId,
             p.relationship || 'Self',
             p.name,
             p.age ?? 0,
@@ -811,12 +839,19 @@ export class LocalDatabase {
       }
     });
 
-    transaction();
+    try {
+      transaction();
+      console.log('[DEBUG DB] saveUserWithPassword successfully completed SQLite transaction.');
+    } catch (err: any) {
+      console.error('[DEBUG DB] saveUserWithPassword transaction FAILED:', err.message);
+      throw err;
+    }
   }
 
   public static async getUserPasswordHash(userId: string): Promise<string | undefined> {
     this.initDatabase();
-    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(userId) as any;
+    const realId = this.resolveUserId(userId);
+    const row = db.prepare('SELECT password_hash FROM users WHERE id = ?').get(realId) as any;
     return row ? row.password_hash : undefined;
   }
 
@@ -835,7 +870,9 @@ export class LocalDatabase {
 
   public static async updateUserProfile(userId: string, profile: UserProfile) {
     this.initDatabase();
-    const user = await this.getUserById(userId);
+    const realId = this.resolveUserId(userId);
+    console.log('[DEBUG DB] updateUserProfile - userId:', userId, 'realId:', realId, 'input profile:', JSON.stringify(profile));
+    const user = await this.getUserById(realId);
     if (user) {
       this.ensureProfiles(user);
       if (!profile.id) {
@@ -845,10 +882,13 @@ export class LocalDatabase {
         profile.relationship = 'Self';
       }
 
+      console.log('[DEBUG DB] Before update - active profile:', JSON.stringify(user.profile));
+
       // Update main active profile if matched
       if (user.profile.id === profile.id) {
         user.profile = profile;
         user.name = profile.name;
+        console.log('[DEBUG DB] Updated active profile to:', JSON.stringify(user.profile));
       }
 
       if (!user.profiles) {
@@ -857,11 +897,23 @@ export class LocalDatabase {
 
       const idx = user.profiles.findIndex(p => p.id === profile.id);
       if (idx >= 0) {
+        console.log('[DEBUG DB] Replacing existing profile at index:', idx);
         user.profiles[idx] = profile;
       } else {
+        console.log('[DEBUG DB] Appending new profile to list');
         user.profiles.push(profile);
       }
-      await this.saveUser(user);
+      
+      try {
+        await this.saveUser(user);
+        console.log('[DEBUG DB] updateUserProfile finished successfully and committed to SQLite');
+      } catch (saveErr: any) {
+        console.error('[DEBUG DB] Failed to save user profiles inside updateUserProfile:', saveErr);
+        throw saveErr;
+      }
+    } else {
+      console.error('[DEBUG DB] User NOT found with ID:', realId);
+      throw new Error(`User with ID ${realId} not found in database.`);
     }
   }
 
@@ -922,6 +974,9 @@ export class LocalDatabase {
 
   public static async saveReport(report: MedicalReport) {
     this.initDatabase();
+    const realId = this.resolveUserId(report.userId);
+    console.log('[DEBUG DB] saveReport - reportId:', report.id, 'Input userId:', report.userId, 'Real relational userId:', realId);
+
     const transaction = db.transaction(() => {
       // 1. Insert or replace report metadata
       db.prepare(`
@@ -948,7 +1003,7 @@ export class LocalDatabase {
           file_path = excluded.file_path
       `).run(
         report.id,
-        report.userId,
+        realId,
         report.patientName || '',
         report.fileName,
         report.fileType,

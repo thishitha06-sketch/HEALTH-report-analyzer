@@ -413,10 +413,10 @@ export default function UserProfile({
             <label className="flex items-start gap-3 cursor-pointer">
               <input
                 type="checkbox"
-                checked={editingProfile.privacySettings.shareWithDoctor}
+                checked={editingProfile.privacySettings?.shareWithDoctor ?? true}
                 onChange={(e) => setEditingProfile({
                   ...editingProfile,
-                  privacySettings: { ...editingProfile.privacySettings, shareWithDoctor: e.target.checked }
+                  privacySettings: { ...(editingProfile.privacySettings || { shareWithDoctor: true, anonymousResearch: false }), shareWithDoctor: e.target.checked }
                 })}
                 className="mt-1 h-5 w-5 rounded border-stone-300 text-emerald-800 focus:ring-emerald-500"
                 id="share-with-doctor-checkbox"
@@ -430,10 +430,10 @@ export default function UserProfile({
             <label className="flex items-start gap-3 cursor-pointer">
               <input
                 type="checkbox"
-                checked={editingProfile.privacySettings.anonymousResearch}
+                checked={editingProfile.privacySettings?.anonymousResearch ?? false}
                 onChange={(e) => setEditingProfile({
                   ...editingProfile,
-                  privacySettings: { ...editingProfile.privacySettings, anonymousResearch: e.target.checked }
+                  privacySettings: { ...(editingProfile.privacySettings || { shareWithDoctor: true, anonymousResearch: false }), anonymousResearch: e.target.checked }
                 })}
                 className="mt-1 h-5 w-5 rounded border-stone-300 text-emerald-800 focus:ring-emerald-500"
                 id="anonymous-research-checkbox"

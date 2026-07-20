@@ -59,6 +59,9 @@ export default function ReportAnalyzer({
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const selectedProfile = user?.profiles?.find(p => p.id === selectedProfileId) || user?.profile;
+  const isProfileIncomplete = !selectedProfile || selectedProfile.isIncomplete;
+
   // Drag and Drop handlers
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -297,6 +300,17 @@ export default function ReportAnalyzer({
               <div className="mt-6 bg-red-50 border border-red-200 rounded-xl p-4 flex items-start gap-3 text-sm text-red-800">
                 <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
                 <span>{errorMsg}</span>
+              </div>
+            )}
+
+            {/* Optional Profile Info Notice */}
+            {isProfileIncomplete && (
+              <div className="mt-6 p-4 bg-amber-50/70 border border-amber-200 rounded-2xl text-amber-850 text-sm flex items-start gap-3 animate-fade-in" id="optional-profile-banner">
+                <AlertTriangle className="w-5 h-5 text-amber-650 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-amber-900">Profile information is optional</p>
+                  <p className="text-xs text-amber-700 mt-0.5">Complete your profile to receive more personalized nutrition and health recommendations.</p>
+                </div>
               </div>
             )}
 
