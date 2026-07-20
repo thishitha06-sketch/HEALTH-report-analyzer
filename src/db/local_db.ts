@@ -175,8 +175,8 @@ export class LocalDatabase {
     if (usersCount.count === 0) {
       console.log("SQLite database is empty. Pre-seeding high-quality mock medical data...");
 
-      // Default Emily Watson password is 'password123'
-      const hashedPw = bcrypt.hashSync('password123', 10);
+      // Default Emily Watson password is the derived password for thishitha06@gmail.com
+      const hashedPw = bcrypt.hashSync('thishitha06@gmail.com_nirva_secure_secret', 10);
       const userId = 'user-123';
       const email = 'thishitha06@gmail.com';
       const name = 'Emily Watson';
