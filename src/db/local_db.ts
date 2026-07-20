@@ -5,45 +5,199 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { User, MedicalReport, UserProfile, Biomarker, NutrientRequirement } from '../types';
 
-// Establish the SQLite database file in a guaranteed-writable directory (like /tmp in Cloud Run/deployment)
-const isProductionEnv = process.env.NODE_ENV === 'production' || !process.env.DISABLE_HMR;
-let isWorkspaceWritable = true;
-try {
-  const testFile = path.join(process.cwd(), '.write_test_db');
-  fs.writeFileSync(testFile, 'test');
-  fs.unlinkSync(testFile);
-} catch (e) {
-  isWorkspaceWritable = false;
-}
+// Establish a single, shared, resilient database path and connection
+function determineDatabasePath(): string {
+  const preferredPaths = [
+    path.join(process.cwd(), 'medical_ai.db'),
+    '/tmp/medical_ai.db'
+  ];
 
-const useTmp = isProductionEnv || !isWorkspaceWritable;
-let dbPath = path.join(process.cwd(), 'medical_ai.db');
-
-if (useTmp) {
-  const tmpDbPath = '/tmp/medical_ai.db';
-  try {
-    const hasExistingTmp = fs.existsSync(tmpDbPath) && fs.statSync(tmpDbPath).size > 0;
-    // If the database file exists in the workspace, copy it to /tmp to retain pre-seeded data
-    if (fs.existsSync(dbPath) && !hasExistingTmp) {
-      console.log(`[DB Initialization] Copying pre-existing database to writeable /tmp path...`);
-      fs.mkdirSync(path.dirname(tmpDbPath), { recursive: true });
-      fs.copyFileSync(dbPath, tmpDbPath);
+  for (const dbPathCandidate of preferredPaths) {
+    const dir = path.dirname(dbPathCandidate);
+    try {
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const testFile = path.join(dir, `.write_test_db_${Math.random().toString(36).substring(2, 9)}`);
+      fs.writeFileSync(testFile, 'test');
+      fs.unlinkSync(testFile);
+      return dbPathCandidate;
+    } catch (e: any) {
+      console.warn(`[DB Initialization] Directory "${dir}" is not writable:`, e.message);
     }
-    dbPath = tmpDbPath;
-  } catch (err: any) {
-    console.error('[DB Initialization] Failed to copy database to /tmp, falling back to workspace path:', err.message);
   }
+
+  const homeDir = process.env.HOME || '/tmp';
+  return path.join(homeDir, 'medical_ai.db');
 }
 
-console.log(`[DB Initialization] Using database path: "${dbPath}"`);
-const db = new Database(dbPath);
+function getResilientDatabase(targetPath: string): any {
+  const fileExists = fs.existsSync(targetPath);
+  console.log(`Database path: "${targetPath}"`);
+  console.log(`Database exists: ${fileExists}`);
+
+  const dir = path.dirname(targetPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  let dbInstance: any;
+  let isCorrupted = false;
+
+  try {
+    dbInstance = new Database(targetPath);
+    console.log(`Database opened successfully`);
+
+    // Verify integrity of database on startup
+    const checkResult = dbInstance.prepare('PRAGMA integrity_check').get() as any;
+    const integrityResult = checkResult ? (checkResult.integrity_check || Object.values(checkResult)[0]) : null;
+    console.log(`Integrity check result: ${integrityResult}`);
+
+    if (integrityResult !== 'ok') {
+      console.error(`[DB Integrity Error] Database at "${targetPath}" is corrupted: "${integrityResult}"`);
+      isCorrupted = true;
+    }
+  } catch (err: any) {
+    console.error(`[DB Startup Error] Failed to open or verify database at "${targetPath}":`, err.message);
+    isCorrupted = true;
+  }
+
+  if (isCorrupted) {
+    if (dbInstance) {
+      try {
+        dbInstance.close();
+      } catch (e) {}
+    }
+
+    const timestamp = Date.now();
+    const corruptedBackupPath = targetPath.replace(/\.db$/, '') + `_corrupted_${timestamp}.db`;
+    console.warn(`[DB Auto-Recovery] Corruption detected! Renaming corrupted file to "${corruptedBackupPath}" and starting fresh database.`);
+
+    try {
+      if (fs.existsSync(targetPath)) {
+        fs.renameSync(targetPath, corruptedBackupPath);
+        console.log(`[DB Auto-Recovery] Renamed corrupted database to "${corruptedBackupPath}" successfully.`);
+      }
+    } catch (renameErr: any) {
+      console.error(`[DB Auto-Recovery] Failed to rename corrupted database:`, renameErr.message);
+      try {
+        fs.unlinkSync(targetPath);
+        console.log(`[DB Auto-Recovery] Deleted corrupted database file: "${targetPath}"`);
+      } catch (unlinkErr: any) {
+        console.error(`[DB Auto-Recovery] Failed to delete corrupted database file:`, unlinkErr.message);
+      }
+    }
+
+    try {
+      dbInstance = new Database(targetPath);
+      console.log(`[DB Auto-Recovery] Fresh database created and opened successfully`);
+    } catch (recreateErr: any) {
+      console.error(`[DB Auto-Recovery] FATAL: Failed to create fresh database at "${targetPath}":`, recreateErr.message);
+      throw recreateErr;
+    }
+  }
+
+  return dbInstance;
+}
+
+function wrapDatabase(rawDb: any): any {
+  const wrappedDb = Object.create(rawDb);
+
+  wrappedDb.prepare = function (sql: string) {
+    let stmt: any;
+    try {
+      stmt = rawDb.prepare(sql);
+    } catch (err: any) {
+      console.error(`[SQLite Prepare Error] SQL statement: "${sql}"`, {
+        code: err.code,
+        message: err.message,
+        stack: err.stack
+      });
+      throw err;
+    }
+
+    const wrappedStmt = Object.create(stmt);
+
+    const wrapMethod = (methodName: string) => {
+      wrappedStmt[methodName] = function (...args: any[]) {
+        try {
+          return stmt[methodName](...args);
+        } catch (err: any) {
+          console.error(`[SQLite Execution Error]`, {
+            sql,
+            parameters: args,
+            code: err.code,
+            message: err.message,
+            stack: err.stack
+          });
+          throw err;
+        }
+      };
+    };
+
+    wrapMethod('run');
+    wrapMethod('get');
+    wrapMethod('all');
+
+    return wrappedStmt;
+  };
+
+  wrappedDb.transaction = function (fn: (...args: any[]) => any) {
+    const txn = rawDb.transaction(fn);
+    return function (...args: any[]) {
+      try {
+        return txn(...args);
+      } catch (err: any) {
+        console.error(`[SQLite Transaction Error]`, {
+          code: err.code,
+          message: err.message,
+          stack: err.stack
+        });
+        throw err;
+      }
+    };
+  };
+
+  wrappedDb.exec = function (sql: string) {
+    try {
+      return rawDb.exec(sql);
+    } catch (err: any) {
+      console.error(`[SQLite Exec Error] SQL: "${sql}"`, {
+        sql,
+        code: err.code,
+        message: err.message,
+        stack: err.stack
+      });
+      throw err;
+    }
+  };
+
+  wrappedDb.pragma = function (sql: string, options?: any) {
+    try {
+      return rawDb.pragma(sql, options);
+    } catch (err: any) {
+      console.error(`[SQLite Pragma Error] PRAGMA: "${sql}"`, {
+        code: err.code,
+        message: err.message,
+        stack: err.stack
+      });
+      throw err;
+    }
+  };
+
+  return wrappedDb;
+}
+
+const dbPath = determineDatabasePath();
+const rawDb = getResilientDatabase(dbPath);
+const db = wrapDatabase(rawDb);
 
 // Enable foreign key constraints
 db.pragma('foreign_keys = ON');
 
 // Ensure uploads folder exists automatically and is writable (use /tmp in production/deployed)
 let uploadsDir = path.join(process.cwd(), 'uploads');
-if (useTmp) {
+if (dbPath.includes('/tmp/')) {
   uploadsDir = '/tmp/uploads';
 }
 
@@ -53,6 +207,25 @@ if (!fs.existsSync(uploadsDir)) {
     console.log(`[DB Initialization] Created uploads directory at: "${uploadsDir}"`);
   } catch (err: any) {
     console.error(`[DB Initialization] Failed to create uploads directory at "${uploadsDir}":`, err.message);
+  }
+}
+
+function ensureColumnExists(tableName: string, columnName: string, columnDef: string) {
+  try {
+    const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as any[];
+    const hasColumn = columns.some((col: any) => col.name.toLowerCase() === columnName.toLowerCase());
+    
+    if (!hasColumn) {
+      console.log(`[Database Migration] Column "${columnName}" not found in table "${tableName}". Adding it...`);
+      db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDef}`);
+      console.log(`[Database Migration] Column "${columnName}" successfully added to table "${tableName}".`);
+    }
+  } catch (err: any) {
+    console.error(`[Database Migration Error] Failed to ensure column "${columnName}" exists in table "${tableName}":`, {
+      code: err.code,
+      message: err.message,
+      stack: err.stack
+    });
   }
 }
 
@@ -74,7 +247,7 @@ export class LocalDatabase {
     return userId;
   }
 
-  private static initDatabase() {
+  public static initDatabase() {
     if (this.seeded) return;
 
     // 1. Create tables
@@ -172,6 +345,35 @@ export class LocalDatabase {
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       );
 
+      -- Extra tables requested in database initialization prompt
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        user_id TEXT,
+        created_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS analysis_results (
+        id TEXT PRIMARY KEY,
+        report_id TEXT,
+        result_data TEXT,
+        created_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS chat_history (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        message TEXT,
+        created_at TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        token TEXT,
+        expires_at TEXT
+      );
+
       -- Create indexes for performance
       CREATE INDEX IF NOT EXISTS idx_user_profiles_user ON user_profiles(user_id);
       CREATE INDEX IF NOT EXISTS idx_medical_reports_user ON medical_reports(user_id);
@@ -181,32 +383,18 @@ export class LocalDatabase {
       CREATE INDEX IF NOT EXISTS idx_health_timeline_user_param ON health_timeline(user_id, parameter);
     `);
 
-    // Safe migration to add file_path to medical_reports if table was created in earlier turn without it
-    try {
-      db.prepare("ALTER TABLE medical_reports ADD COLUMN file_path TEXT").run();
-    } catch (err) {
-      // Column already exists or table doesn't exist
-    }
+    console.log('Tables created');
 
-    // Safe migration to add is_incomplete to user_profiles
-    try {
-      db.prepare("ALTER TABLE user_profiles ADD COLUMN is_incomplete INTEGER DEFAULT 0").run();
-    } catch (err) {
-      // Column already exists or table doesn't exist
-    }
+    // Run migrations using ensureColumnExists
+    ensureColumnExists('medical_reports', 'file_path', 'TEXT');
+    ensureColumnExists('user_profiles', 'is_incomplete', 'INTEGER DEFAULT 0');
+    ensureColumnExists('user_profiles', 'activity_level', "TEXT DEFAULT 'Sedentary'");
+    ensureColumnExists('user_profiles', 'pregnancy_status', "TEXT DEFAULT 'Not Applicable'");
+    ensureColumnExists('user_profiles', 'BMI', 'REAL');
 
-    // Safe migration to add activity_level and pregnancy_status
-    try {
-      db.prepare("ALTER TABLE user_profiles ADD COLUMN activity_level TEXT DEFAULT 'Sedentary'").run();
-    } catch (err) {
-      // Column already exists
-    }
+    console.log('Migration completed');
 
-    try {
-      db.prepare("ALTER TABLE user_profiles ADD COLUMN pregnancy_status TEXT DEFAULT 'Not Applicable'").run();
-    } catch (err) {
-      // Column already exists
-    }
+    this.seeded = true;
 
     // 2. Pre-seed high-quality mock data if database is empty
     const usersCount = db.prepare('SELECT COUNT(*) as count FROM users').get() as { count: number };
@@ -1174,3 +1362,6 @@ export class LocalDatabase {
     return rows;
   }
 }
+
+// Automatically initialize and verify database during startup
+LocalDatabase.initDatabase();

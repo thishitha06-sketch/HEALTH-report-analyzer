@@ -189,6 +189,7 @@ app.post('/api/auth/register', async (req, res) => {
   }
 
   try {
+    console.log('Registration started');
     const normEmail = email.toLowerCase();
     const existing = await LocalDatabase.getUserByEmail(normEmail);
     if (existing) {
@@ -225,6 +226,10 @@ app.post('/api/auth/register', async (req, res) => {
 
     await LocalDatabase.saveUserWithPassword(newUser, passwordHash);
 
+    console.log('Registration completed');
+    console.log('Profile created');
+    console.log('Workspace created');
+
     // Generate JWT token containing the actual relational userId
     const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
 
@@ -234,7 +239,11 @@ app.post('/api/auth/register', async (req, res) => {
     res.json({ message: 'Registration successful', user: newUser });
   } catch (err: any) {
     console.error('Registration error:', err);
-    res.status(500).json({ error: 'Internal registration failure.', details: err.message });
+    res.status(500).json({
+      success: false,
+      error: 'Database initialization failed.',
+      details: err.message
+    });
   }
 });
 
