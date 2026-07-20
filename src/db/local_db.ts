@@ -5,17 +5,43 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { User, MedicalReport, UserProfile, Biomarker, NutrientRequirement } from '../types';
 
-// Establish the SQLite database file in the project workspace root
-const dbPath = path.join(process.cwd(), 'medical_ai.db');
+// Establish the SQLite database file in a guaranteed-writable directory (like /tmp in Cloud Run/deployment)
+const isProductionEnv = process.env.NODE_ENV === 'production' || !process.env.DISABLE_HMR;
+let dbPath = path.join(process.cwd(), 'medical_ai.db');
+
+if (isProductionEnv) {
+  const tmpDbPath = '/tmp/medical_ai.db';
+  try {
+    // If the database file exists in the workspace, copy it to /tmp to retain pre-seeded data
+    if (fs.existsSync(dbPath) && !fs.existsSync(tmpDbPath)) {
+      console.log(`[DB Initialization] Copying pre-existing database to writeable /tmp path...`);
+      fs.copyFileSync(dbPath, tmpDbPath);
+    }
+    dbPath = tmpDbPath;
+  } catch (err: any) {
+    console.error('[DB Initialization] Failed to copy database to /tmp, falling back to workspace path:', err.message);
+  }
+}
+
+console.log(`[DB Initialization] Using database path: "${dbPath}"`);
 const db = new Database(dbPath);
 
 // Enable foreign key constraints
 db.pragma('foreign_keys = ON');
 
-// Ensure uploads folder exists automatically
-const uploadsDir = path.join(process.cwd(), 'uploads');
+// Ensure uploads folder exists automatically and is writable (use /tmp in production/deployed)
+let uploadsDir = path.join(process.cwd(), 'uploads');
+if (isProductionEnv) {
+  uploadsDir = '/tmp/uploads';
+}
+
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+    console.log(`[DB Initialization] Created uploads directory at: "${uploadsDir}"`);
+  } catch (err: any) {
+    console.error(`[DB Initialization] Failed to create uploads directory at "${uploadsDir}":`, err.message);
+  }
 }
 
 export class LocalDatabase {

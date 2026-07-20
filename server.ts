@@ -34,8 +34,22 @@ app.use(compression());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// Ensure uploads folder exists and is writable (use /tmp/uploads in production/deployed environment)
+const isProductionEnv = process.env.NODE_ENV === 'production' || !process.env.DISABLE_HMR;
+let uploadsDir = path.join(process.cwd(), 'uploads');
+if (isProductionEnv) {
+  uploadsDir = '/tmp/uploads';
+}
+if (!fs.existsSync(uploadsDir)) {
+  try {
+    fs.mkdirSync(uploadsDir, { recursive: true });
+  } catch (err: any) {
+    console.error('[Server] Failed to create uploads folder:', err.message);
+  }
+}
+
 // Serve uploaded reports statically (safe path)
-app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
+app.use('/uploads', express.static(uploadsDir));
 
 // Requirement 4: Custom Request Logging Middleware
 app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
@@ -722,10 +736,9 @@ CRITICAL INSTRUCTIONS:
       try {
         const sanitizedName = (fileName || 'report').replace(/[^a-zA-Z0-9.\-_]/g, '_');
         const uniqueFileName = `${Date.now()}_${sanitizedName}`;
-        const relativePath = path.join('uploads', uniqueFileName);
-        const fullPath = path.join(process.cwd(), relativePath);
+        const fullPath = path.join(uploadsDir, uniqueFileName);
         fs.writeFileSync(fullPath, buffer);
-        storedFilePath = relativePath;
+        storedFilePath = path.join('uploads', uniqueFileName);
         console.log(`[File Storage] File stored successfully: "${storedFilePath}"`);
       } catch (uploadErr: any) {
         console.error('[File Storage] Failed to write uploaded file to disk:', uploadErr);
