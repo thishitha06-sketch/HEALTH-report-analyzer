@@ -62,6 +62,61 @@ const ai = new GoogleGenAI({
   }
 });
 
+// Helper to perform Gemini API requests with exponential backoff retry on transient errors
+async function generateContentWithRetry(params: { model: string; contents: any; config?: any }, maxRetries = 4, initialDelay = 1000) {
+  let attempt = 0;
+  let currentModel = params.model;
+  
+  // Model fallbacks for text models under high load/demand
+  const fallbackModels: Record<string, string[]> = {
+    'gemini-3.5-flash': ['gemini-2.5-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b'],
+  };
+
+  while (true) {
+    try {
+      console.log(`[Gemini API Request] Sending request to model: "${currentModel}"...`);
+      return await ai.models.generateContent({
+        ...params,
+        model: currentModel
+      });
+    } catch (error: any) {
+      attempt++;
+      // Determine if error is a transient/retryable error (e.g., 503 UNAVAILABLE, 429 RESOURCE_EXHAUSTED, 502 BAD GATEWAY)
+      const status = error.status || error.statusCode || (error.error && error.error.code);
+      const errorMsg = error.message || '';
+      const isTransient = status === 503 || status === 429 || status === 502 || status === 504 ||
+                          errorMsg.includes('503') ||
+                          errorMsg.includes('502') ||
+                          errorMsg.includes('429') ||
+                          errorMsg.includes('UNAVAILABLE') ||
+                          errorMsg.includes('high demand') ||
+                          errorMsg.includes('ResourceExhausted') ||
+                          errorMsg.includes('spikes in demand') ||
+                          errorMsg.includes('overloaded');
+      
+      if (isTransient && attempt <= maxRetries) {
+        const delay = initialDelay * Math.pow(2, attempt - 1);
+        
+        const fallbacks = fallbackModels[params.model];
+        if (fallbacks && (attempt - 1) < fallbacks.length) {
+          currentModel = fallbacks[attempt - 1];
+          console.warn(`[Gemini Retry] Attempt ${attempt}/${maxRetries} failed with transient error: "${errorMsg}". Falling back to model "${currentModel}" in ${delay}ms...`);
+        } else if (fallbacks && fallbacks.length > 0) {
+          currentModel = fallbacks[fallbacks.length - 1];
+          console.warn(`[Gemini Retry] Attempt ${attempt}/${maxRetries} failed with transient error: "${errorMsg}". Retrying with model "${currentModel}" in ${delay}ms...`);
+        } else {
+          console.warn(`[Gemini Retry] Attempt ${attempt}/${maxRetries} failed with transient error: "${errorMsg}". Retrying in ${delay}ms...`);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`[Gemini Retry] Call failed permanently after ${attempt} attempts. Error:`, error);
+        throw error;
+      }
+    }
+  }
+}
+
 // Middleware to extract and verify Bearer JWT Token or legacy ID
 const authMiddleware = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
   try {
@@ -823,7 +878,7 @@ Respond ONLY with a valid JSON object matching the requested schema.`
     console.log('[Gemini API Request] Initializing request with "gemini-3.5-flash"...');
     let response;
     try {
-      response = await ai.models.generateContent({
+      response = await generateContentWithRetry({
         model: 'gemini-3.5-flash',
         contents: contents,
         config: {
@@ -1124,7 +1179,7 @@ CRITICAL SAFETY & CONDUCT RULES:
       parts: [{ text: message }]
     });
 
-    const response = await ai.models.generateContent({
+    const response = await generateContentWithRetry({
       model: 'gemini-3.5-flash',
       contents: formattedContents,
       config: {
